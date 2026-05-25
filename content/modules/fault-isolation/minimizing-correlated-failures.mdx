@@ -235,17 +235,9 @@ Each **AWS Region** is completely isolated from other Regions at multiple levels
 
 ### Availability Zone Design
 
-Within each Region, **Availability Zones** provide fine-grained isolation:
+Within each Region, **Availability Zones** add fine-grained isolation: physically separate facilities with independent power, cooling, and network, deployed to on independent calendars so software changes never affect multiple zones simultaneously, but connected over low-latency dedicated fiber so synchronous replication is practical. This design is covered in detail in [Blast Radius and Failure Boundaries](/course/fault-isolation/fault-isolation-boundaries).
 
-**Physical separation**: AZs are physically separated by meaningful distance—typically many miles (up to 60 miles / 100 kilometers)—sufficient to prevent single localized events from affecting multiple zones. A tornado, lightning strike, flood, or earthquake affecting one zone won't simultaneously impact another.
-
-**Independent infrastructure**: Each AZ has its own power substations (different transformers, different electrical feeds from utilities), independent backup generators and UPS systems, separate cooling infrastructure (different chillers, independent HVAC), and connections to different upstream network providers through diverse physical fiber paths.
-
-**Software independence**: AWS services run independent stacks in each Availability Zone within a Region. The EC2 compute stack in use1-az1 shares minimal code and infrastructure with use1-az2. Services are deployed to different AZs on different days. A deployment problem in one AZ affects only that AZ.
-
-**Low-latency connectivity**: Despite physical separation, AZs connect via high-bandwidth, low-latency networking over dedicated, fully redundant metro fiber. This private network provides single-digit millisecond latency, enabling synchronous replication and rapid failover between zones.
-
-This design transforms infrastructure correlation from a major risk into a manageable concern with well-understood blast radius. Service teams architect systems to span multiple Availability Zones, knowing that a failure in one zone won't correlate with failures in others (except in the rare case of truly regional events).
+For correlated-failure purposes, the relevant property is that AWS deliberately *engineers away* correlation across AZs — different substations, different fiber paths, different deployment days — so that an outage in one zone is highly unlikely to coincide with an outage in another.
 
 ## Software Uniformity and Behavioral Correlation
 
@@ -301,162 +293,18 @@ Similar risks exist in distributed systems where large numbers of clients change
 
 ## Using Jitter to Desynchronize Behaviors
 
-**Jitter**—adding small amounts of randomness to common behaviors and limits—is a powerful technique for preventing synchronized behaviors that create correlated load spikes. The technique is simple but remarkably effective.
+**Jitter** — adding small amounts of randomness to common behaviors and limits — is the standard countermeasure for synchronized behavior. Apply it to:
 
-### Common Applications of Jitter
+- **Retry delays**: full or decorrelated jitter on exponential backoff so 1,000 simultaneously-failed clients don't all retry at the same instant
+- **Cache TTLs**: stagger expirations across the fleet to prevent thundering-herd database queries when popular cache entries expire together
+- **Periodic jobs and credential refresh**: scatter the work across the period so midnight cleanup or 1-hour-token refresh doesn't spike all at once
+- **Resource limits**: vary connection-pool sizes or other limits slightly per host so the whole fleet doesn't hit identical limits at identical times
 
-**Retry delays with exponential backoff and jitter**:
+The detailed treatment with code samples for retry jitter (full jitter, decorrelated jitter, capped backoff) lives in [Retry Strategies That Don't Make Things Worse](/course/traffic-management/timeouts-retries-backoff).
 
-Instead of a fixed delay:
-```python
-# Bad: All clients retry at the same time
-def retry_with_fixed_delay(func, max_attempts=3):
-    for attempt in range(max_attempts):
-        try:
-            return func()
-        except Exception:
-            if attempt < max_attempts - 1:
-                time.sleep(5)  # All clients wait exactly 5 seconds
-    raise Exception("Max retries exceeded")
-```
+### Make jitter deterministic for debuggability
 
-Use exponential backoff with jitter:
-```python
-# Good: Clients retry at randomized times
-import random
-
-def retry_with_jitter(func, max_attempts=3, base_delay=1):
-    for attempt in range(max_attempts):
-        try:
-            return func()
-        except Exception:
-            if attempt < max_attempts - 1:
-                # Exponential backoff: 1s, 2s, 4s, 8s...
-                delay = base_delay * (2 ** attempt)
-                # Full jitter: random between 0 and delay
-                jittered_delay = random.uniform(0, delay)
-                time.sleep(jittered_delay)
-    raise Exception("Max retries exceeded")
-```
-
-With 1000 clients all experiencing the same failure, fixed delay causes all 1000 to retry simultaneously. Jittered delays spread retries across the entire delay window, preventing the retry storm that can prevent recovery.
-
-**Cache TTL randomization**:
-
-Instead of fixed expiration:
-```python
-# Bad: All cache entries expire simultaneously
-cache.set(key, value, ttl=3600)  # 1 hour for all entries
-```
-
-Add jitter to expiration:
-```python
-# Good: Cache entries expire at different times
-base_ttl = 3600
-jitter = random.randint(-300, 300)  # ±5 minutes
-cache.set(key, value, ttl=base_ttl + jitter)
-```
-
-This prevents the thundering herd problem where all cached entries expire simultaneously, causing a massive coordinated database query spike.
-
-**Housekeeping job scheduling**:
-
-Instead of synchronized timing:
-```python
-# Bad: All servers run cleanup at midnight
-schedule.every().day.at("00:00").do(cleanup_job)
-```
-
-Add startup jitter:
-```python
-# Good: Each server runs cleanup at different time
-import hashlib
-
-# Deterministic jitter based on hostname
-hostname = socket.gethostname()
-hash_value = int(hashlib.md5(hostname.encode()).hexdigest(), 16)
-offset_minutes = hash_value % (24 * 60)  # 0-1440 minute offset
-
-schedule_time = f"{offset_minutes // 60:02d}:{offset_minutes % 60:02d}"
-schedule.every().day.at(schedule_time).do(cleanup_job)
-```
-
-Each server runs cleanup at a different time spread across the 24-hour period, preventing coordinated load spikes.
-
-**Credential expiration jitter**:
-
-Instead of synchronized expiration:
-```python
-# Bad: All tokens expire exactly at 3600 seconds
-token_ttl = 3600
-```
-
-Add jitter to expiration:
-```python
-# Good: Tokens expire at different times
-base_ttl = 3600
-jitter = random.randint(-300, 300)  # ±5 minutes
-token_ttl = base_ttl + jitter
-```
-
-This spreads credential refresh operations across time rather than causing all services to refresh credentials simultaneously.
-
-**Resource limit variation**:
-
-Instead of identical limits:
-```python
-# Bad: All servers have identical connection pool size
-connection_pool_size = 50
-```
-
-Add small variation:
-```python
-# Good: Each server has slightly different limit
-import hashlib
-
-hostname = socket.gethostname()
-hash_value = int(hashlib.md5(hostname.encode()).hexdigest(), 16)
-jitter = (hash_value % 11) - 5  # -5 to +5
-connection_pool_size = 50 + jitter
-```
-
-This prevents all servers from hitting resource limits at exactly the same time under increasing load.
-
-### Making Jitter Debuggable
-
-One challenge with jitter is that it can complicate debugging. If behavior varies across servers and time, bugs and failures can become harder to reproduce. The solution is **deterministic jitter**—seeding the random function with a well-known parameter so each server uses consistent values, yet different servers use different values.
-
-```python
-import random
-import hashlib
-import socket
-
-def get_deterministic_random(seed_value, min_val, max_val):
-    """
-    Generate deterministic random value for this server.
-    Same server always returns same value, but different
-    servers return different values.
-    """
-    # Create seed from server-specific identifier
-    hostname = socket.gethostname()
-    seed_string = f"{hostname}-{seed_value}"
-    seed = int(hashlib.md5(seed_string.encode()).hexdigest(), 16)
-
-    # Use seed to generate random value
-    random.seed(seed)
-    value = random.randint(min_val, max_val)
-
-    # Reset random state to not affect other random calls
-    random.seed()
-
-    return value
-
-# Usage
-cache_ttl_jitter = get_deterministic_random("cache_ttl", -300, 300)
-cleanup_offset = get_deterministic_random("cleanup_job", 0, 1440)
-```
-
-Each server consistently uses the same jitter values (making behavior predictable and debuggable), but different servers use different values (preventing correlation). You can reproduce behavior on a specific server by using its hostname, but the jitter prevents fleet-wide synchronized behaviors.
+Pure randomness makes behavior unreproducible. Seed the random value from a per-host identifier (hostname, instance ID) so each server consistently uses the same jitter values across runs, but different servers use different ones. You get fleet-wide desynchronization *and* reproducible per-host behavior — easier to debug when one host misbehaves.
 
 ## Cellular Architectures for Isolation
 

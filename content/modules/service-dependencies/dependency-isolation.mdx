@@ -671,13 +671,7 @@ Of course, Amazon puts a great deal of engineering effort into continuously impr
 
 ## Concurrency Isolation in Amazon EC2
 
-Concurrency isolation is also something that the Amazon Elastic Compute Cloud (Amazon EC2) service teams think about extensively. AWS Regions are composed of multiple isolated Availability Zones that are designed to be independent.
-
-Each Availability Zone is separated by a meaningful physical distance from other zones to avoid correlated failure scenarios due to environmental hazards like fires, floods, and tornadoes. Each Availability Zone has independent physical infrastructure:
-- Dedicated connections to utility power
-- Standalone backup power sources
-- Independent mechanical services
-- Independent network connectivity within and beyond the Availability Zone
+Concurrency isolation also shows up in how EC2 itself is built. Each Region is composed of multiple Availability Zones designed to fail independently (see [Blast Radius and Failure Boundaries](/course/fault-isolation/fault-isolation-boundaries)). EC2 leverages that isolation in its own service architecture.
 
 ### Zonal Isolation in the Control Plane
 

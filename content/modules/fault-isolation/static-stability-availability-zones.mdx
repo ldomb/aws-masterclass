@@ -10,121 +10,21 @@ The alternative is **static stability**—designing systems that continue operat
 
 Availability Zones provide the foundational infrastructure building block that makes static stability practical at scale. When combined with static stability design principles, Availability Zones enable regional services to maintain operation through various failure scenarios without requiring complex failover orchestration or rapid capacity adjustments.
 
-## Understanding Availability Zones as Fault Isolation Boundaries
+## Availability Zones as Fault Isolation Boundaries
 
-Availability Zones are logically isolated sections within an AWS Region, each consisting of one or more discrete data centers. What makes them powerful for fault isolation isn't just their existence—it's the careful engineering that makes them genuinely independent.
+This lesson assumes familiarity with how Availability Zones provide isolation — physical separation, independent power and network, and zonal deployment calendars that prevent correlated software failures. If you haven't already, read [Blast Radius and Failure Boundaries](/course/fault-isolation/fault-isolation-boundaries) for the full treatment.
 
-### Physical Separation and Independence
+The summary: each zone is engineered to fail independently, but zones in a Region connect over high-bandwidth dedicated fiber with single-digit-millisecond latency. That combination — independent enough to fail separately, close enough to replicate synchronously — is what makes multi-AZ architectures practical. Because each VPC subnet maps to exactly one AZ, subnet selection is implicitly zone selection.
 
-**Meaningful distance separates zones**. Availability Zones within a Region are physically separated by enough distance—sometimes up to 60 miles (100 kilometers)—to protect against correlated failures from localized events. A lightning strike, tornado, flood, or earthquake affecting one zone won't simultaneously impact another. When utility companies deploy updates to electrical substations or telecommunications providers perform fiber maintenance, these operations affect one zone at a time, not all zones simultaneously.
+The rest of this lesson focuses on what to *do* with those properties: design systems that keep working through AZ impairments without needing control-plane operations to recover.
 
-This separation isn't arbitrary. It's calculated based on real-world failure scenarios observed across decades of operating data centers. The distance is large enough to prevent physical event correlation but small enough to maintain low-latency connectivity between zones.
+## The control-plane / data-plane separation that enables static stability
 
-**Independent infrastructure underpins each zone**. Availability Zones don't share power grids, cooling systems, or most physical infrastructure. Each zone has its own power substations, backup generators, and UPS systems. Each has independent cooling infrastructure with redundant chillers and HVAC systems. Each connects to different upstream network providers with diverse physical fiber paths.
+Static stability is only possible because AWS services separate **control plane** (orchestration: launching, modifying, deleting resources) from **data plane** (the day-to-day work: forwarding packets, reading/writing objects, executing queries). The control plane is complex and lower-availability; the data plane is simpler and higher-availability. The two are covered in depth in [Blast Radius and Failure Boundaries](/course/fault-isolation/fault-isolation-boundaries).
 
-This independence means that infrastructure maintenance, upgrades, or failures in one zone don't propagate to others. When a power substation serving one zone performs scheduled maintenance, other zones continue operating normally. When a fiber cut affects connectivity to one zone, other zones maintain connectivity through different physical paths.
+The relevant property for this lesson: **the EC2 data plane is designed to be statically stable in the face of control plane impairments**. The hypervisor has local copies of route tables, security group rules, and ARP entries. If the EC2 control plane goes down, existing instances keep routing packets, reading EBS volumes, and serving traffic — they just can't be launched, modified, or terminated. The same separation applies to S3, DynamoDB, RDS, ELB, Lambda, and most other AWS services.
 
-**High-speed interconnection enables practical multi-AZ architectures**. Despite physical separation, all Availability Zones in a Region connect via high-bandwidth, low-latency networking over fully redundant, dedicated metro fiber. This private network provides single-digit millisecond latency between zones, making synchronous data replication practical and allowing applications to fail over between zones without noticeable service interruption.
-
-The low latency is critical. It enables patterns like synchronous database replication to standby instances in different zones (as used by Amazon RDS Multi-AZ deployments) and allows distributed systems to maintain strong consistency while spanning zones. Without this high-speed interconnect, multi-AZ architectures would be forced to choose between consistency and availability—with it, you can achieve both.
-
-### Software Independence Through Deployment Practices
-
-Physical independence addresses hardware failures, power outages, and infrastructure issues. Software independence addresses an equally important class of failures: deployment problems and software bugs.
-
-**Zonal deployment calendars** ensure that AWS never deploys software updates to multiple Availability Zones simultaneously. When Amazon EC2 deploys updates to physical servers hosting instances, edge devices managing network traffic, DNS resolvers, or control plane components, these deployments follow strict schedules that separate zones by at least a day.
-
-This practice combines with standard phased rollout procedures: deploy to one-box (single server) first to validate functionality, then 1% of servers, then 10%, then 25%, etc. But EC2 adds another layer—these percentages are calculated **per Availability Zone**, and deployments to different zones happen on different days.
-
-The impact is profound. If a deployment contains a bug that causes failures, that bug affects only one Availability Zone. Engineers detect the problem through automated monitoring or manual testing, roll back the bad deployment, fix the bug, and validate the fix—all while other Availability Zones continue operating normally on the previous, working software version. Customers who architected their applications across multiple zones experience zero impact.
-
-**Zone-local fault isolation** means failures don't cascade across zone boundaries. When a software bug causes issues in one zone, or when a maintenance operation goes wrong, or when an configuration change has unexpected effects, the blast radius is limited to that zone. Other zones, running independently, continue serving traffic.
-
-Many AWS customers specify Availability Zones when launching resources, often implicitly through subnet selection. Since each VPC subnet exists entirely within a single Availability Zone, choosing a subnet means choosing a zone. This visibility allows customers to consciously distribute resources across zones, taking advantage of the isolation AWS provides.
-
-<Callout type="info">
-When you launch an EC2 instance, create an RDS database, or provision an ElastiCache cluster, you typically specify a VPC subnet. Because each subnet maps to exactly one Availability Zone, this subnet selection implicitly chooses which zone will host your resource. Understanding this relationship is critical for designing multi-AZ architectures.
-</Callout>
-
-## Control Planes, Data Planes, and the Separation that Enables Stability
-
-To understand how static stability works in practice, we must examine how AWS services are architected internally. The separation of control planes and data planes—combined with data plane static stability—forms the foundation of AWS service reliability.
-
-### Amazon EC2: A Case Study in Separation
-
-Amazon EC2 provides an excellent example because it's both a foundational service that other services depend on and a service that customers directly interact with.
-
-**The EC2 control plane** orchestrates everything involved in launching a new instance. This is enormously complex:
-
-1. **Find suitable physical hardware**: Evaluate thousands of servers to find appropriate compute capacity while respecting placement group rules, tenancy requirements, and capacity reservations
-2. **Allocate network resources**: Assign IP addresses from the VPC subnet, provision elastic network interfaces, and configure security group rules
-3. **Prepare storage**: Create and attach EBS volumes, configure instance store (if applicable), and establish necessary I/O paths
-4. **Generate credentials**: Create temporary IAM role credentials if the instance uses an IAM instance profile
-5. **Configure security**: Install security group rules, configure network ACLs, and establish firewall rules
-6. **Store configuration**: Persist instance metadata across multiple data stores for redundancy
-7. **Propagate settings**: Push routing information to VPC routers, configure load balancer targets, and update DNS records
-
-Each of these steps involves multiple systems, API calls, and distributed transactions. The control plane coordinates hundreds of components to transform a launch request into a running instance.
-
-**The EC2 data plane** maintains running instances—a much simpler operation:
-
-1. **Route packets**: Forward network traffic according to VPC route tables already installed locally
-2. **Maintain storage connectivity**: Read from and write to EBS volumes using established connections
-3. **Monitor health**: Track instance status and report to monitoring systems
-4. **Enforce security**: Apply security group rules using locally cached configurations
-
-The contrast is stark. The control plane is orchestration-heavy and distributed. The data plane is straightforward and localized.
-
-### Static Stability in the Data Plane
-
-Here's the critical architectural decision: **The EC2 data plane is designed to be statically stable in the face of control plane failures**.
-
-The physical machine hosting an EC2 instance has **local access** to all information needed to route packets to points inside and outside its VPC. Route tables, security group rules, network ACLs, and ARP tables are cached locally on the hypervisor. If the EC2 control plane becomes completely unavailable, the instance continues routing packets correctly using this local state.
-
-What happens during a control plane impairment?
-
-**Traffic that was working before continues working**: An instance that could communicate with RDS databases, send requests to other instances, receive traffic from load balancers, and access the internet continues doing all of these things. No interruption occurs. No connections are dropped. From the instance's perspective, nothing has changed.
-
-**New information doesn't propagate**: During the impairment, the server hosting the instance won't see updates like a new instance being added to the VPC (which would require updating route tables), a new security group rule (which would require updating firewall configurations), or a new subnet (which would require updating routing information). But the absence of these updates doesn't affect existing traffic flows.
-
-**Data plane operations continue**: Applications can still attach and detach EBS volumes, read and write data, send and receive network packets, and use all resources that were already configured. Only control plane operations like launching new instances or modifying configurations are affected.
-
-> "The Amazon EC2 data plane has been carefully designed to be statically stable in the face of control plane availability events. The physical machine on which an EC2 instance runs has local access to all of the information it needs to route packets to points inside and outside of its VPC."
-
-### Why This Separation Matters
-
-The separation of control and data planes, combined with data plane static stability, provides multiple advantages:
-
-**Availability targets can differ**: The EC2 data plane targets higher availability than the control plane. For most customers, keeping existing instances running is more critical than being able to launch new ones. By separating these functions, AWS can invest more heavily in data plane reliability while accepting that control plane operations might occasionally face limitations.
-
-**Scale dimensions are independent**: The data plane handles vastly more volume than the control plane—billions of packet forwarding decisions per second versus thousands of instance launches per second. Separating them allows independent scaling according to their own relevant dimensions.
-
-**Failure probability is lower for simpler systems**: The data plane has fewer moving parts than the control plane, making it statistically less likely to fail. Complex orchestration with many dependencies is inherently more fragile than straightforward packet forwarding with local state.
-
-**Operational practices can optimize for each plane**: Data plane operations prioritize minimizing latency and maximizing throughput. Control plane operations prioritize correctness and state consistency. Different optimization goals suit different architectures.
-
-This pattern extends beyond EC2. S3's data plane (reading and writing objects) is separate from its control plane (creating buckets, configuring permissions). DynamoDB's data plane (GetItem, PutItem, Query) is separate from its control plane (CreateTable, UpdateTable). The pattern is foundational to how AWS services achieve high availability.
-
-<Mermaid title="EC2 Control Plane vs Data Plane Separation" chart={`graph TB
-    subgraph Control Plane["Control Plane (Orchestration)"]
-        Launch[Launch Instance]
-        Config[Configure Resources]
-        Update[Update Settings]
-    end
-    subgraph Data Plane["Data Plane (Operation)"]
-        Route[Route Packets]
-        Storage[Access EBS]
-        Monitor[Monitor Health]
-    end
-    Launch -.Initial Setup.-> Route
-    Config -.Initial Setup.-> Storage
-    Update -.Initial Setup.-> Monitor
-
-    style Control Plane fill:#fff3e0,color:#1a1a1a
-    style Data Plane fill:#e8f5e9,color:#1a1a1a
-`} />
-
-**Try it yourself:** Experiment with the interactive simulation below to see how static stability and multi-AZ architecture works in practice.
+This is the foundation everything else in this lesson builds on.
 
 <MultiAZTopology />
 

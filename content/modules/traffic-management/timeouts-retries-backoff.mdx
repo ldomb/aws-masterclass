@@ -250,51 +250,16 @@ This creates **capped exponential backoff**. However, this introduces a new prob
 
 ### Token Bucket Retry Limiting
 
-AWS SDKs (since 2016) implement **token bucket throttling** to manage retry load without the modal behavior and testing challenges of circuit breakers:
+AWS SDKs (since 2016) cap retry rates with a **token bucket**: each retry consumes a token, the bucket refills at a fixed rate, and exhausted clients fall back to the refill rate. This is the same algorithm used for general admission control — see [Preventing Noisy Neighbors in Shared Systems](/course/service-dependencies/fairness-multi-tenant) for the full algorithm.
 
-**How it works:**
+Used for retries specifically, it provides:
 
-1. A "bucket" contains a fixed number of retry tokens
-2. Each retry attempt consumes a token
-3. Tokens are replenished at a fixed rate
-4. When tokens are available, retries happen immediately
-5. When tokens are exhausted, retries happen at the token replenishment rate
-
-```python
-class TokenBucket:
-    def __init__(self, capacity, refill_rate):
-        self.capacity = capacity
-        self.tokens = capacity
-        self.refill_rate = refill_rate  # tokens per second
-        self.last_refill = time.time()
-
-    def try_consume(self):
-        """Try to consume a token. Returns True if successful."""
-        self._refill()
-        if self.tokens >= 1:
-            self.tokens -= 1
-            return True
-        return False
-
-    def _refill(self):
-        """Refill tokens based on elapsed time."""
-        now = time.time()
-        elapsed = now - self.last_refill
-        new_tokens = elapsed * self.refill_rate
-        self.tokens = min(self.capacity, self.tokens + new_tokens)
-        self.last_refill = now
-```
-
-This approach provides several benefits:
-
-- Allows bursts of retries when tokens are available
-- Limits sustained retry rate when failures persist
-- Prevents complete retry storms
-- Avoids the "all or nothing" behavior of circuit breakers
-- Continues making some progress even during extended failures
+- Burst tolerance when error rates are low
+- A hard ceiling on sustained retry traffic when a dependency is failing
+- Graceful degradation instead of the all-or-nothing modal behavior of circuit breakers
 
 <Callout type="info">
-**Circuit Breakers vs. Token Buckets**: While circuit breakers are widely promoted, Amazon has found they introduce modal behavior that's difficult to test and can add significant time to recovery. Token buckets provide rate limiting without completely stopping all traffic.
+**Circuit Breakers vs. Token Buckets**: Amazon often prefers token-bucket rate limiting over circuit breakers because circuit breakers introduce modal behavior that's hard to test and can prolong recovery. Token buckets keep some traffic flowing throughout.
 </Callout>
 
 ### Deciding When to Retry
@@ -303,32 +268,9 @@ Not all failures should trigger retries. Making the wrong decision can lead to d
 
 #### APIs with Side Effects
 
-**Read-only APIs** are typically safe to retry—reading data multiple times produces the same result. However, **APIs with side effects** (creating resources, modifying state, charging payments) are dangerous to retry without additional safeguards.
+**Read-only APIs** are typically safe to retry. **APIs with side effects** (creating resources, modifying state, charging payments) are not — a naive retry after a network error could double-charge a customer or launch a duplicate instance.
 
-**Example problematic retry:**
-```python
-# Dangerous: could create duplicate charges
-def charge_customer(amount):
-    try:
-        payment_api.charge(customer_id, amount)
-    except NetworkError:
-        payment_api.charge(customer_id, amount)  # Retry - might charge twice!
-```
-
-**Solution: Idempotency tokens**
-
-Some AWS APIs provide explicit mechanisms for safe retries. Amazon EC2's `RunInstances` API accepts a `ClientToken` parameter that ensures the same token creates only one instance:
-
-```python
-# Safe: idempotency token ensures at-most-once semantics
-client.run_instances(
-    ImageId='ami-12345',
-    InstanceType='t2.micro',
-    ClientToken='unique-request-id-12345',  # Ensures idempotency
-    MinCount=1,
-    MaxCount=1
-)
-```
+The solution is **idempotency tokens** — a caller-provided unique identifier that lets the service deduplicate retries. Most AWS APIs that have side effects accept one (EC2's `RunInstances` takes a `ClientToken`, for example). For the full pattern, including how services implement deduplication and handle semantically-equivalent responses, see [Designing Idempotent APIs for Safe Retries](/course/traffic-management/idempotent-apis).
 
 #### Distinguishing Retryable Failures
 

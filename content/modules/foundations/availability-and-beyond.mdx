@@ -258,35 +258,18 @@ Within AWS Regions, many services offer strongly consistent data persistence. Am
 
 ## Static Stability and Fault Isolation
 
-Two important architectural concepts enable high availability:
+Two architectural concepts underpin high availability:
 
-**Fault tolerance** is the ability to withstand subsystem failure and maintain availability (doing the right thing within established SLAs). To implement fault tolerance, workloads use spare or redundant subsystems. When one subsystem in a redundant set fails, another picks up its work, typically almost seamlessly. With true spares, multiple subsystem failures are required to produce adverse impact on the workload.
+- **Fault tolerance** — the workload keeps meeting its SLAs despite a subsystem failing, via spare or redundant subsystems
+- **Fault isolation** — failure in one module doesn't propagate; the module acts as a fault container
 
-**Fault isolation** minimizes scope of impact when failure occurs. This is typically implemented with modularization—workloads are broken into small subsystems that fail independently and can be repaired in isolation. Failure of a module doesn't propagate beyond the module. This concept spans both:
-
-- **Vertically** – Across different functionality in a workload
-- **Horizontally** – Across multiple subsystems providing the same functionality
-
-These modules act as **fault containers** limiting scope of impact during events.
-
-The architectural patterns of **control planes**, **data planes**, and **static stability** directly support implementing fault tolerance and isolation:
-
-**Control plane** – The part of the workload involved in making changes: adding resources, deleting resources, modifying resources, and propagating changes where needed. Control planes are typically more complex with more moving parts than data planes, making them statistically more likely to fail and have lower availabilities.
-
-**Data plane** – The part providing day-to-day business functionality. Data planes tend to be simpler and operate at higher volumes than control planes, leading to higher availabilities.
-
-**Static stability** – The ability of a workload to continue correct operation despite dependency impairments. One implementation method removes control plane dependencies from data planes. Another method loosely couples workload dependencies. Perhaps the workload doesn't see updated information (new things, deleted things, modified things) that dependencies were supposed to deliver, but everything working before the impairment continues functioning.
-
-When thinking about workload impairment, there are two high-level recovery approaches:
-
-1. **React after impairment** – Respond using AWS Auto Scaling to add new capacity
-2. **Prepare before impairment** – Overprovision infrastructure so the workload continues operating correctly without needing additional resources
-
-A statically stable system uses the latter approach, pre-provisioning spare capacity to be available during failure. This avoids creating dependencies on control planes in the workload's recovery path to provision new capacity. Additionally, provisioning new capacity for various resources takes time. While waiting for new capacity, your workload can become overloaded by existing demand and experience further degradation, leading to "brown-out" or complete availability loss.
+These are enabled by separating **control planes** (the orchestration machinery that makes changes — typically more complex, lower availability) from **data planes** (the day-to-day request handling — simpler, higher availability), and by designing systems for **static stability** (operating correctly through dependency impairment without needing control-plane actions to recover).
 
 > **Rule 7**: Don't take dependencies on control planes in your data plane, especially during recovery.
-
+>
 > **Rule 8**: Loosely couple dependencies so your workload can operate correctly despite dependency impairment, where possible.
+
+→ Control plane / data plane architecture is covered in depth in [Blast Radius and Failure Boundaries](/course/fault-isolation/fault-isolation-boundaries). Static stability — including the active-active 50% overprovisioning pattern and active-standby failover — has its own lesson: [Designing for Static Stability](/course/fault-isolation/static-stability-availability-zones).
 
 ## Measuring Availability in Practice
 

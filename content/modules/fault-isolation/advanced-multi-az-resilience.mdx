@@ -111,94 +111,29 @@ The conclusion: workloads can't always rely on underlying systems to detect and 
 
 Detecting gray failures requires high-fidelity visibility into how your system behaves in each Availability Zone. Standard AWS infrastructure metrics (CPU utilization, disk I/O, network traffic) provide operational insights but don't directly measure customer experience or align to fault isolation boundaries.
 
-### The Principles of Effective Instrumentation
+General instrumentation principles — measuring customer experience over infrastructure, structured logging, EMF, log-first-aggregate-later — are covered in [End-to-End Instrumentation Strategies](/course/observability/instrumenting-distributed-systems). This section focuses on what's *specific* to multi-AZ gray-failure detection.
 
-**Measure customer experience, not just infrastructure**: Instrument your application code to record what actually matters—request success/failure, latency percentiles, business transaction completion, data consistency, user-visible errors. Infrastructure metrics tell you what your servers are doing; application metrics tell you what your customers are experiencing.
+### Align dimensions to AZ fault boundaries
 
-**Align metrics to fault isolation boundaries**: Use dimensions that correspond to how failures actually manifest. For multi-AZ architectures, critical dimensions include:
-- **Region**: AWS Region where the resource operates
-- **AZ-ID**: Availability Zone ID (use1-az1, not the AZ name us-east-1a)
-- **Resource identifier**: Instance ID, container ID, Lambda function invocation ID
-- **Functional component**: Controller/action, microservice name, API method
+For multi-AZ gray-failure detection, the critical dimensions are:
 
-Why AZ-ID instead of AZ name? Availability Zone names (us-east-1a, us-east-1b) are account-specific. The physical Availability Zone that maps to "us-east-1a" in one AWS account might map to "us-east-1b" in another account. AZ-IDs (use1-az1, use1-az2) are consistent across all accounts in a Region, enabling correlation across accounts and comparison with AWS service metrics.
+- **Region**: the AWS Region the resource operates in
+- **AZ-ID**: the Availability Zone *ID* (`use1-az1`), not the AZ *name* (`us-east-1a`)
+- **Resource identifier**: instance, container, or Lambda invocation
+- **Functional component**: controller/action, microservice, API method
 
-**Generate metrics from multiple vantage points**: Server-side instrumentation captures what your application observes. Client-side canaries capture what a typical customer experiences. Combining both perspectives provides comprehensive coverage—you can detect issues that affect real requests even if your application's internal metrics look healthy.
+**Why AZ-ID, not AZ name.** AZ names are account-specific — `us-east-1a` in one account may map to a different physical zone than `us-east-1a` in another. AZ-IDs are stable across all accounts in a Region, so they correlate with AWS service metrics and cross-account dashboards.
 
-**Define thresholds proactively**: Don't wait for an incident to decide what "normal" looks like. Establish thresholds based on customer impact, not arbitrary percentages. For example:
-- Availability: 99.9% success rate (0.1% error budget)
-- Latency: P99 under 500ms (acceptable user experience)
-- Throughput: Minimum 100 requests/second per AZ (capacity floor)
+Emit these dimensions through CloudWatch's Embedded Metric Format with multiple dimension sets (instance, AZ+endpoint, Region+endpoint, AZ, Region) so you can alarm at any granularity from a single log entry. See [the EMF discussion in the instrumentation lesson](/course/observability/instrumenting-distributed-systems) for the JSON schema.
 
-### Implementing Embedded Metric Format (EMF)
+### Canaries per AZ, not per Region
 
-CloudWatch's Embedded Metric Format enables you to emit metrics alongside structured logs, automatically extracting metrics while preserving full log context for debugging. Here's a comprehensive example of a web service logging request metrics:
+Synthetic canaries provide the client-side view needed to detect gray failures. For multi-AZ detection specifically:
 
-```json
-{
-  "_aws": {
-    "Timestamp": 1634319245221,
-    "CloudWatchMetrics": [{
-      "Namespace": "MyApp/Frontend",
-      "Metrics": [
-        { "Name": "RequestCount", "Unit": "Count" },
-        { "Name": "2xx", "Unit": "Count" },
-        { "Name": "4xx", "Unit": "Count" },
-        { "Name": "5xx", "Unit": "Count" },
-        { "Name": "SuccessLatency", "Unit": "Milliseconds" },
-        { "Name": "ErrorLatency", "Unit": "Milliseconds" }
-      ],
-      "Dimensions": [
-        ["Region", "AZ-ID", "Controller", "Action", "InstanceId"],
-        ["Region", "AZ-ID", "Controller", "Action"],
-        ["Region", "Controller", "Action"],
-        ["Region", "AZ-ID"],
-        ["Region"]
-      ]
-    }]
-  },
-  "TraceId": "1-5f9c8e12-3d4f2a1b8c9e5f7a6b3d4e2f",
-  "SourceIP": "203.0.113.42",
-  "UserAgent": "Mozilla/5.0...",
-  "RequestPath": "/api/products/123",
-  "Controller": "Products",
-  "Action": "GetProduct",
-  "Region": "us-east-1",
-  "AZ-ID": "use1-az2",
-  "InstanceId": "i-0abc123def456789",
-  "HttpStatusCode": 200,
-  "RequestCount": 1,
-  "2xx": 1,
-  "4xx": 0,
-  "5xx": 0,
-  "SuccessLatency": 42,
-  "ErrorLatency": 0,
-  "CacheHit": true,
-  "DatabaseQueries": 2,
-  "DatabaseLatency": 15
-}
-```
-
-**Multiple dimension sets**: The example includes five dimension sets, progressing from most granular (instance level) to least granular (region level). This structure supports creating alarms at each level:
-- Instance-level alarms detect individual problematic instances
-- AZ + Controller/Action alarms detect zone-specific endpoint issues
-- Region + Controller/Action alarms detect region-wide endpoint problems
-- AZ-level alarms detect zone-wide issues across all endpoints
-- Region-level alarms detect region-wide systemic issues
-
-**Rich context for debugging**: Beyond metrics, the log includes trace IDs, source IPs, request paths, and performance details. When an alarm triggers, you can query logs filtered by the same dimensions to understand what was happening during the incident.
-
-### Designing Canary Monitoring
-
-Synthetic monitoring through canaries provides client-side perspective on service health. Canaries should:
-
-**Test from within each AZ**: Deploy canaries in each Availability Zone to test zone-local endpoints. A canary running in use1-az1 should test endpoints in use1-az1, not cross-zone endpoints. This ensures networking issues within an AZ don't cause false negatives for other AZs.
-
-**Test representative user journeys**: Don't just ping health check endpoints. Execute actual business transactions: create account → add item to cart → checkout → confirm order. These end-to-end tests catch issues that simple health checks miss.
-
-**Emit metrics with AZ dimensions**: Canary metrics should use the same dimensional structure as server-side metrics, enabling correlation. When both server-side and client-side metrics show degradation in use1-az2, confidence in the diagnosis is high.
-
-**Run continuously at appropriate intervals**: Balance detection speed with cost. Critical paths might warrant per-minute canaries. Less critical workflows might run every 5-10 minutes. Very expensive operations might run hourly but test the complete workflow.
+- **Deploy a canary in each AZ** that tests zone-local endpoints. A canary in `use1-az1` should drive traffic to `use1-az1` infrastructure — cross-zone canaries hide AZ-isolated problems.
+- **Test representative user journeys**, not just `/health`. End-to-end transactions catch issues that liveness probes miss.
+- **Emit canary metrics with the same AZ-ID dimensions** as server-side metrics so they correlate cleanly.
+- **Cadence by criticality**: per-minute for hot paths, longer intervals for less-critical workflows.
 
 ## Detecting Gray Failures with CloudWatch Composite Alarms
 

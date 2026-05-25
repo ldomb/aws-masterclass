@@ -1,460 +1,121 @@
 ## Introduction
 
-Years before joining Amazon, Mike Haken worked in restaurants. He held numerous positions—server, line cook, bartender, and delivery driver—experiencing firsthand how restaurants dealt with unpredictable demand and operational challenges. He noticed that most places handled busy events like the lunch rush in similar ways: managing queues, prioritizing critical work, and employing specific strategies to maintain predictable service quality even under stress.
+Years before joining Amazon, Mike Haken worked in restaurants — as a server, line cook, bartender, and delivery driver. He noticed that most places dealt with unpredictable demand using the same handful of strategies: managing queues, prioritizing critical work, and employing specific tactics to keep service quality predictable even under stress.
 
-When Haken started working at Amazon, he was struck by how closely the approaches to solving problems of load in restaurants resembled the strategies Amazon uses to build resilient distributed systems in the cloud. The parallels are remarkable and instructive.
+When Haken started working at Amazon, he was struck by how closely the approaches to handling load in restaurants resembled the strategies AWS uses for distributed systems. The parallels are remarkable. A restaurant has fundamentally **static capacity** — fixed tables, fixed cooks. Cloud services are **elastic** and can rapidly scale, but the underlying behaviors when load exceeds capacity are surprisingly similar.
 
-In restaurants, usually all customers could be seated and served quickly. However, temporary problems could cause significant delays even when it wasn't particularly busy. This happened when many customers arrived or ordered at the same time, or when mistakes caused rework (dropping a plate requiring the meal to be prepared again). When it did get busy and customer count exceeded capacity, restaurants created queues of waiting customers. Both situations made customers unhappy.
-
-To manage these problems, restaurants employed numerous strategies to provide a predictable and consistently good customer experience. After transitioning to cloud technologies at Amazon, Haken continued drawing upon his restaurant experience. He observed how spikes in load could affect cloud systems similarly to how overload affected restaurant service quality. But he also saw a significant difference: **cloud services are elastic** and can rapidly add capacity in response to demand, whereas restaurant capacity is largely static and takes years to scale.
-
-This lesson explores the strategies Amazon uses to control excessive load and build resilient systems. You'll learn operational practices like load shedding, fairness, and auto-scaling, architectural practices like constant work and queue management, and client-side patterns like circuit breakers and adaptive retries. Understanding these patterns through restaurant analogies will help you recognize when and how to apply them in your own systems.
-
-## The Fundamental Challenge: Overload in Restaurants and the Cloud
-
-Restaurants have fundamentally **static capacity**. The square footage doesn't change. The number of tables and chairs is fixed. Kitchen equipment and staff count can't be altered quickly. When demand exceeds capacity, customers queue at the door. If service slows down—perhaps due to a complex order or a kitchen mistake—the entire system backs up, creating longer waits for everyone.
-
-Cloud services are fundamentally different—they're **elastic** and can rapidly add capacity in response to increased demand. At Amazon, automated capacity forecasting and auto-scaling help ensure services stay ahead of demand by significant margins. AWS favors being over-provisioned to provide a buffer in capacity. This relieves customers from traditional on-premises capacity planning and allows them to build elastic services in the cloud.
-
-For example, AWS services plan for extremely unlikely events, such as the loss of capacity of a single Availability Zone. Sufficient capacity is pre-provisioned in other Availability Zones to seamlessly absorb both the additional work and forecasted usage growth.
+This lesson is a **tour of the patterns** Amazon uses to control excessive load, framed through restaurant analogies. Each pattern is introduced here at a conceptual level. Most of them have a full dedicated lesson elsewhere in the course — those deep dives are linked inline. Read this lesson to build a mental map; read the dedicated lessons to learn how to apply each pattern in practice.
 
 <Callout type="info">
-This approach means that under normal circumstances, AWS services have sufficient capacity to handle significant variations in load. In the cloud, **true overload scenarios are rare events**. But when things don't go to plan and one of these exceptional events does occur, AWS must be prepared to prevent impact to customers' experience.
+At Amazon, true overload is rare because of forecasting, auto-scaling, and pre-provisioned capacity buffers. The strategies in this lesson are safety mechanisms for exceptional events, not the primary operating mode.
 </Callout>
 
-At Amazon, a combination of strategies prevents overload, falling into three main categories:
+The patterns fall into three groups:
 
-- **Well-protected services**: Architectural and operational practices that prevent services from being overwhelmed
-- **Well-behaved clients**: Patterns that prevent clients from overwhelming their dependencies during stress
-- **Observability systems**: Detection mechanisms that rapidly identify overload conditions
+- **Well-protected services**: architectural and operational practices that prevent services from being overwhelmed
+- **Well-behaved clients**: patterns that prevent clients from overwhelming their dependencies during stress
+- **Observability**: detection mechanisms that rapidly identify overload
 
-This lesson provides a high-level overview of the most common strategies, describing when and why Amazon uses each strategy and identifying the pros and cons of each approach.
+## Operational practice: Load shedding
 
-## Operational Practice: Load Shedding
+In a restaurant, when staff get busy they deprioritize "side work" — refilling salsa, rolling napkins — and focus on the most important customer-facing tasks. The kitchen and dining room stay caught up by intentionally dropping non-essential work.
 
-In restaurants, staff have responsibilities called "side work"—activities that help the restaurant run smoothly but aren't directly customer-facing. These include refilling the salsa pan, restocking tortilla chips, rolling forks and knives into napkins, and refilling ice. There weren't dedicated resources for side work; servers and cooks fit these tasks around their primary responsibilities.
+In distributed systems, this is **load shedding**: cheaply rejecting work instead of spending limited resources on it. When offered load passes a tipping point, accepting more work actually *lowers* the system's **goodput** (work it can successfully complete within client timeouts). Load shedding keeps goodput flat at the maximum sustainable level, protecting the requests the service does accept.
 
-When the restaurant got really busy, staff prioritized the most important work: taking customer orders, refilling drinks, and delivering food. Side work was deprioritized. This enabled the team to keep up with increased demand and maintain average service times. If they didn't reprioritize this way, they might spend significant time doing work that wasn't essential for the customer experience (eating a meal in a reasonable time), resulting in an overall slowdown in the restaurant.
+Load shedding is indiscriminate by nature — it sheds whatever requests happen to arrive at the moment, regardless of which customer sent them. That makes it a coarse tool, used in coordination with the fairness patterns below.
 
-Of course, neglecting side work couldn't last forever—eventually the chips and salsa would run out, and they'd have to restock them. But temporary deprioritization maintained service quality during peak load. This is analogous to **load shedding** in distributed systems—intentionally discarding work temporarily.
+→ Full treatment in [Taming Queue Backlogs Under Pressure](/course/traffic-management/queue-backlogs) and [Preventing Noisy Neighbors in Shared Systems](/course/service-dependencies/fairness-multi-tenant).
 
-When offered load a system receives increases, it can hit a **tipping point** where additional load actually lowers the system's **goodput**—its ability to successfully process work within the client timeout. The acts of accepting new work, placing it into a processing queue, and context switching between different processes all contribute to additional processing latency.
+## Operational practice: Fairness and quotas
 
-<Mermaid title="Load Shedding: Goodput vs Overload" chart={`graph TD
-    A[Load Below Threshold] -->|System handles increased load| B[Goodput Increases]
-    C[Load Above Threshold] -->|System overwhelmed| D[Goodput Decreases]
+Some restaurants give parties a time limit on holidays so one party can't monopolize a table all night. Limiting any single party's resource use lets the restaurant serve more customers fairly.
 
-    B -->|Maintaining service quality| E[Happy Path]
-    D -->|Context switching, queueing delays| F[Degraded Performance]
+AWS does the equivalent with **per-customer quotas** so that one customer driving heavy load can't degrade service for everyone else — a "single-tenant experience in a multi-tenant system." Quotas are enforced through rate-limiting algorithms (token bucket, leaky bucket, sliding window) and exposed via published service quotas with CloudWatch usage metrics.
 
-    style E fill:#90EE90,color:#1a1a1a
-    style F fill:#ffcccb,color:#1a1a1a
-`} />
+The cost: occasionally throttling a customer who's exceeding their share, even if total system capacity is available. Worth it to keep behavior predictable.
 
-Load shedding helps prevent making a bad situation worse. It protects a service from becoming overwhelmed during transient spikes in load and provides time to scale or address the root cause of the problem. The result of load shedding is allowing the system to handle increased load while maintaining a consistent level of goodput.
+→ Full treatment of fairness, quotas, and rate-limiting algorithms in [Preventing Noisy Neighbors in Shared Systems](/course/service-dependencies/fairness-multi-tenant).
 
-Amazon uses load shedding in varying dimensions—it could be per service, per API, or per resource. In implementing load shedding, it's important for the system to know when it's taking on too much work. Therefore, Amazon might look at request rate, thread pool utilization, queue depth, or other metrics. **Overload testing** is an essential component to both identifying the tipping point and ensuring that load shedding keeps goodput flat instead of turning down after that tipping point is reached.
+## Operational practice: Auto Scaling
 
-However, the effects of load shedding are generally **indiscriminate** in their impact on customers. It's a coarse-grained tool to control load. While it helps extend the runway the service has to maintain a high level of goodput, it also impacts customer experience, so it's not the only solution Amazon wants in place. Load shedding is used in coordination with other strategies to create a more holistic approach to controlling load.
+Restaurants forecast: as seasons change, they stock different ingredients. But forecasts don't handle surprise spikes — if National Gazpacho Day spikes orders in December, the restaurant either improvises or runs out.
 
-<Callout type="warning">
-Load shedding is a last line of defense, not a primary strategy. It indicates that something has gone wrong—demand has exceeded provisioned capacity, or there's an unexpected failure impacting the system. The goal is to rarely need load shedding through proper capacity planning and forecasting.
-</Callout>
+AWS uses **automated capacity forecasting** combined with EC2 Auto Scaling to keep capacity ahead of demand. Substantial buffers handle large fluctuations. For unforecasted spikes faster than auto-scaling can react, load shedding and rate limiting protect the service while new capacity comes online.
 
-## Operational Practice: Fairness and Quota Management
+→ Auto-scaling and capacity management is covered as part of the broader availability discussion in [Measuring and Designing for High Availability](/course/foundations/availability-and-beyond).
 
-On holidays, some restaurants give customers a time limit on how long they can occupy a table before they need to leave. This ensures that one party can't monopolize a table for the entire night, allowing the restaurant to turn it over and seat other customers. By limiting the amount of time any one party could occupy a table, the restaurant was able to accommodate more customers during the meal service and provide a fairer share of the tables each night.
+## Architectural practice: Managing queue depth
 
-At Amazon, a similar practice ensures customers get an equitable share of available resources. When a single customer is driving excessive load, indiscriminate load shedding would unfairly impact all customers. Instead, AWS uses techniques that maintain a **single-tenant experience in a multi-tenant system** so that customers receive consistent, predictable performance.
+When a restaurant's wait list grows too long, wait-time estimates become inaccurate, customers leave, and the kitchen risks preparing meals for tables that have already walked out. Servers and kitchen need to communicate to drop work for tables that have given up.
 
-To do so, AWS typically measures resource consumption through request rate or number of provisioned resources and enforces these limits through **Service Quotas**. Examples include:
+Cloud systems face the same problem with deep FIFO queues: workers spend time on messages the client has already timed out on. The oldest messages in deep queues are the most likely to be wasted work, yet FIFO processes them first. The remedies — bounded queues, LIFO, time-based discard, priority queues — all rest on one principle: **it's better to explicitly reject work than to accept it and fail to complete it.**
 
-- Transactions per second (TPS) in APIs
-- Number of Amazon EC2 instances you can launch
-- Concurrency of AWS Lambda functions in your account
-- Read/write capacity units for Amazon DynamoDB tables
-
-### Rate Limiting Algorithms
-
-When it comes to maintaining fairness of TPS, AWS might decide to rate limit customers who exceed their quota using various algorithms:
-
-**Token bucket** (generally the most popular): Tokens accumulate in a bucket at a fixed rate. Each request consumes one or more tokens. If the bucket is empty, the request is rejected or delayed. This allows for bursting—if the bucket has accumulated tokens during quiet periods, a temporary spike in requests can be accommodated.
-
-**Leaky bucket**: Requests are added to a queue that "leaks" at a constant rate. Excess requests overflow and are rejected. This enforces a strict constant rate.
-
-**Exponentially weighted moving average (EWMA)**: A weighted average of recent request rates determines whether the current request should be allowed. More recent requests have higher weight.
-
-**Fixed window**: Limits requests per fixed time period (e.g., 1000 requests per minute). Simple to implement but can allow bursts at window boundaries.
-
-**Sliding window**: Limits requests in any rolling time period, preventing the boundary burst problem of fixed windows.
-
-However, AWS services aren't under full load all of the time, so occasionally it's fair to let a customer exceed their quota temporarily through **bursting** in conjunction with one of these algorithms. Token bucket is particularly well-suited for this, as tokens accumulate during periods of lower usage.
-
-<Mermaid title="Request Quota and Rate Limiting Flow" chart={`graph TD
-    A[Customer Request Arrives] --> B{Check Quota}
-    B -->|Within quota| C[Process Request]
-    B -->|Exceeds quota| D{Burst capacity available?}
-    D -->|Yes| C
-    D -->|No| E[Reject/Throttle Request]
-
-    C --> F[Consume Tokens/Credits]
-    F --> G[Successful Response]
-
-    style C fill:#90EE90,color:#1a1a1a
-    style E fill:#ffcccb,color:#1a1a1a
-    style G fill:#90EE90,color:#1a1a1a
-`} />
-
-### Proactive Quota Management
-
-For service quotas, AWS publishes default and applied values of quota information that can be accessed through the AWS Management Console or the AWS CLI. To help customers proactively manage their service quotas, AWS provides usage metrics in Amazon CloudWatch. These metrics allow customers to manage usage by:
-
-- Visualizing metrics and creating custom dashboards
-- Setting up alarms that indicate when approaching a quota threshold
-- Requesting quota increases when needed
-
-This makes it easier to stay ahead of service quota increases or address inadvertent usage of resource quotas. Customers can monitor their usage trends and request increases before hitting limits, preventing quota-related failures.
-
-Fairness helps deliver a consistent, single-tenant experience in a multi-tenant environment. But it comes at the cost of occasionally providing a degraded customer experience when AWS has to rate limit or enforce a quota. Like load shedding, fairness is used in combination with other strategies to comprehensively manage load.
-
-## Operational Practice: Auto Scaling
-
-When restaurants see a trend of increased or decreased usage of any item over the course of a day, week, or month, they ensure they're stocked appropriately for consumption of that item in the future. These usage trends help continuously forecast future capacity needs. For example, as seasons change from spring to summer, restaurants typically see a drop in hot soup orders and an increase in cold soup orders. As these changes occur, they order fewer ingredients for hot soup and more for cold soup to serve their forecast and prevent wasted resources.
-
-But this kind of forecasting doesn't handle sudden spikes in demand well. In the United States, National Gazpacho Day occurs in the normally cold month of December each year. If a restaurant weren't pre-provisioned in expectation of demand on that day, orders could likely exceed the quantity of gazpacho they'd normally stock in winter. Typically, when restaurants ran out of a menu item, they'd remove it from the menu ("86 it" in restaurant speak) and stop accepting orders. Then they'd either scale up by preparing more for that meal service (if they had the ingredients) or wait for the next food delivery.
-
-Although this usually provided a stopgap to give time to scale production, on National Gazpacho Day the increased demand was transient, and increasing gazpacho supply for the next day in response wouldn't be useful. **Auto-scaling in the cloud has many of the same considerations**.
-
-### AWS's Capacity Management Strategy
-
-At Amazon, the primary strategy for ensuring sufficient capacity is through **automated forecasting**. This ensures AWS provides future capacity needs that contain significant buffers for large fluctuations in actual usage, including short-term events like Amazon Prime Day or the day after Thanksgiving in the United States.
-
-AWS also:
-
-- Proactively monitors service quotas and can automatically request quota increases when a service is nearing a limit
-- Pre-provisions resources to handle the loss of capacity of one Availability Zone, which acts as an additional capacity buffer
-- Uses Amazon EC2 Auto Scaling to tailor capacity to shorter-term changes in demand
-
-Auto Scaling allows AWS services to continue to be elastic while helping optimize capacity provisioning.
-
-However, in rare events where traffic spikes suddenly beyond forecasted numbers, **auto-scaling by itself can be insufficient because it doesn't react fast enough**. The following diagram illustrates this challenge:
-
-<Mermaid title="Auto Scaling and Load Shedding During Traffic Spikes" chart={`graph TD
-    A[Normal Operation] -->|Gradual growth| B[Forecasting + Auto Scaling Keeps Ahead]
-    A -->|Sudden spike| C[Demand Exceeds Provisioned Capacity]
-
-    C -->|Auto Scaling detects and adds capacity| D[Scaling Lag Period]
-    D -->|Additional capacity comes online| E[System Recovers]
-
-    C -->|Meanwhile...| F[Load Shedding + Rate Limiting Protect Service]
-    F --> E
-
-    style B fill:#90EE90,color:#1a1a1a
-    style C fill:#ffcccb,color:#1a1a1a
-    style F fill:#ffffcc,color:#1a1a1a
-`} />
-
-This figure shows a coarse-grained view of how capacity forecasting and auto-scaling keep AWS ahead of the actual demand curve. During transient spikes that are within the capacity buffer, the system handles them without issue. But a sudden load spike that exceeds provisioned capacity over a period shorter than the time required for auto-scaling to detect and react must be managed with **load shedding or rate limiting** to protect the service from overload impacts.
-
-Forecasting, auto-scaling, and pre-provisioned capacity are essential tools for providing elasticity in the cloud and delivering a good customer experience while minimizing unnecessary waste. At Amazon, substantial investments in capacity management handle significant, transient load spikes. During the rare events where demand exceeds provisioned capacity more quickly than auto-scaling can handle, the combination of load shedding and rate limiting helps protect the service while scaling catches up to meet demand or the load event dissipates.
-
-## Architectural Practice: Managing Queue Depth
-
-When a restaurant goes on a wait list, as the queue grows it becomes harder and harder to accurately predict individual customer wait times. The restaurant needs to manage the queue to avoid customers waiting longer than they were told. After waiting long enough, customers might just leave and go somewhere else. The list can't grow indefinitely—at some point the restaurant needs to close for the next day, and staff certainly want to go home at some point.
-
-Beyond providing accurate wait times, excessively deep queues affect the customer experience in another way. On occasion when it took too long to bring food to a table, a customer might leave before receiving their meal (their timeout threshold had been reached). If the kitchen were unaware that the customer had left, it would spend time preparing meals based on their ticket queue for people who would never receive them.
-
-As customers gave up waiting for their food, the kitchen would continue to do work that didn't lead to **goodput** (useful completed work). If more customers walked out, the situation could continue in perpetuity, similar to a **metastable failure**—a sustained degraded state that persists even after the initial trigger is resolved.
-
-To stop the sustained impact, servers needed to tell the kitchen which tables had already left, so cooks could move on to orders for customers who were still patiently waiting.
-
-<Callout type="warning">
-**Metastable failures** are particularly dangerous because they can persist long after the initial trigger is resolved. A system can remain in a degraded state even when external load returns to normal, requiring manual intervention to recover.
-</Callout>
-
-This situation plays out in cloud systems with excessively deep First In, First Out (FIFO) queues. Workers waste time and resources processing messages that the client has already given up on. The oldest messages in deep queues are most likely to exceed client timeouts, yet FIFO queues process them first.
-
-### AWS's Approaches to Managing Queues
-
-Amazon takes great care to design systems that prevent excessive latency and metastable failures driven by queue depth. Common approaches include:
-
-**Bounded queues with rejection**: Set a maximum queue size and reject excess work through rate limiting or load shedding. This makes queues testable at a maximum size that provides predictable performance under load.
-
-**Last In, First Out (LIFO) queues**: Process the most recently received work, which is most likely to succeed within client timeout. This is counterintuitive but effective—recent requests are more likely to have sufficient time remaining on their timeout budgets.
-
-**Time-based queue management**: Attach timestamps to queued work and discard items that have exceeded expected processing time before spending resources on them.
-
-**Priority queues**: Process different types of work with different priorities, ensuring critical operations complete even under stress.
-
-Both bounded queues and LIFO queues help AWS systems do useful work and provide a more consistent customer experience. However, they also potentially reject some work or by design ignore work based on the service's understanding of what is most likely to succeed.
-
-The key insight is that **it's better to explicitly reject work than to accept it and then fail to complete it**. Explicit rejection allows clients to implement proper retry logic and potentially route requests elsewhere. Silent failure after queuing wastes resources and creates unpredictable latency.
-
-**Try it yourself:** Experiment with the interactive simulation below to see how queue depth and backpressure affect system performance during overload.
+A related danger is **metastable failure**: a degraded state that persists long after the original trigger is gone, because the system keeps doing wasteful work on the backlog.
 
 <QueueSimulator />
 
-## Architectural Practice: Constant Work
+→ Full treatment of bimodal queue behavior, multi-tenant queue isolation, in-flight message limits, dead-letter queues, and Little's-Law-driven concurrency growth in [Taming Queue Backlogs Under Pressure](/course/traffic-management/queue-backlogs).
 
-At one restaurant where Haken worked, they'd sometimes host private events. Guests would ebb and flow in and out of the event without a waitlist (at least up to what the fire code allowed in the building). Guests could come and go, and staff didn't know how long they would stay. This created a guest service problem.
+## Architectural practice: Constant work
 
-If servers took a unique order from every person and submitted each order to the kitchen, it would produce a very spikey, inconsistent load pattern. This could result in a huge backlog of orders. Additionally, guests might leave before receiving their order, resulting in wasted effort and food (similar to the queue situation discussed previously).
+At private events, restaurants don't take individual orders — they send out platters of hors d'oeuvres at fixed intervals. The kitchen does the same amount of work regardless of how many guests are present. Some food may be wasted, but service is predictable and the kitchen never gets blown up.
 
-At these events, restaurants avoided this problem by performing **constant work** to prevent overload. In restaurant terms, this means servers sent out hors d'oeuvres and small plates at regular intervals, which alleviated pressure on the kitchen. The staff knew they had to plate food at consistent intervals and only had to prepare a set number of dishes. They planned to serve the maximum number of guests that could fit in the venue.
+AWS uses the same **constant work** pattern in critical infrastructure: instead of pushing configuration on change, servers poll an S3 bucket every few seconds and re-apply the configuration *even if nothing changed*. This eliminates variability precisely when reliability matters most — during failures or load spikes, the system does exactly the same work as during normal operation.
 
-This provided a good customer experience—everyone could graze, and new platters of food came out quickly. The amount of work the kitchen and wait staff performed didn't fluctuate based on the number of guests present. However, the downside was that food might be wasted and extra work might be done if fewer guests attended than expected.
+→ Full treatment, including Route 53 health-check fixed-size payloads and AWS Hyperplane's S3-based config loop, in [The Constant Work Pattern](/course/foundations/reliability-constant-work).
 
-### Constant Work in AWS Systems
+## Architectural practice: Putting the smaller service in control
 
-When AWS builds services expected to process highly variable rates of change, constant work is a common strategy selected to smooth out variance in those change rates. **Constant work means that a system doesn't scale up or down with load or stress**—it does the exact same amount of work in almost all conditions, resulting in predictable load without spikes.
+Bartenders on a busy night don't let customers shout drink orders at them — they walk the bar and ask each customer in turn. The smaller fleet (bartenders) controls the rate at which the larger fleet (customers) is served.
 
-For example, instead of pushing new configuration files to a server fleet each time there's an update, servers poll an Amazon S3 bucket every few seconds for the configuration file and apply it, **even if nothing has changed**.
+The same applies to control planes (small) talking to data planes (large). When the data plane outnumbers the control plane 100:1 or more, letting the larger fleet poll the smaller fleet creates overload risk: any synchronized event (reboot, retry storm, bug) can drive concurrent requests well past the control plane's capacity. AWS prefers patterns where the small fleet dictates the pace — via S3 intermediaries, reverse connections, or UDP notifications for extreme scale mismatches.
 
-<Mermaid title="Servers Polling S3 for Configuration Updates" chart={`sequenceDiagram
-    participant Config as Configuration Service
-    participant S3 as Amazon S3
-    participant Server1 as Server 1
-    participant Server2 as Server 2
-    participant ServerN as Server N
+→ Full treatment, including AWS Hyperplane and the UDP notification pattern, in [Inverting the Flow: Letting Small Services Lead](/course/traffic-management/smaller-service-in-control).
 
-    Config->>S3: Write updated config (when changes occur)
+## Well-behaved clients: Circuit breakers
 
-    loop Every few seconds
-        Server1->>S3: Poll for configuration
-        S3->>Server1: Return config file
-        Server1->>Server1: Apply configuration
-    end
+When the kitchen got overwhelmed, wait staff sometimes paused new order acceptance entirely so cooks could clear the queue. But pausing all orders when only the grill is backed up — and the salad station is fine — unnecessarily turned a small problem into a large one.
 
-    loop Every few seconds
-        Server2->>S3: Poll for configuration
-        S3->>Server2: Return config file
-        Server2->>Server2: Apply configuration
-    end
+**Circuit breakers** in software are the same pattern: when a dependency is failing, the client stops sending requests for a backoff period. Done well (with granular fault domains aligned to the dependency's actual failure boundaries), they prevent the client from compounding the dependency's problem. Done poorly (whole-dependency breakers), they amplify a small partition-level issue into a complete outage.
 
-    loop Every few seconds
-        ServerN->>S3: Poll for configuration
-        S3->>ServerN: Return config file
-        ServerN->>ServerN: Apply configuration
-    end
-`} />
+→ Full treatment of bulkheads, per-API isolation, and partition-aware circuit breakers in [Bulkheads and Concurrency Limits](/course/service-dependencies/dependency-isolation). For why Amazon often prefers *not* to use circuit breakers at all, see [Why Fallback Is a Trap](/course/traffic-management/avoiding-fallback).
 
-This means the system must be scaled to handle that constant rate of work, introducing potential additional cost by performing work when it might not be needed. Just like the possibility of wasted food at the restaurant event, this pattern can introduce wasted work in the system. However, AWS typically finds this cost is offset by the resilience and stability benefit it provides.
+## Well-behaved clients: Adaptive retries
 
-But the pattern can't always be used—sometimes event-driven systems are genuinely needed. The trade-off between constant work's predictability and event-driven systems' efficiency must be carefully evaluated for each use case.
+A patient customer asks their server for salad dressing once and waits. An impatient customer flags down every server who walks by — and ends up with five extra sides of dressing while their actual order is delayed.
 
-## Architectural Practice: Putting the Smaller Service in Control
+Naive retries do the same to dependencies: each retry adds load to a system that's already struggling, and retry amplification through deep call chains can multiply load by k^n. **Adaptive retries** add two protections: a retry quota (token bucket) that limits retries when error rates are high, and client-side rate limiting that throttles new requests when the dependency signals overload.
 
-During his restaurant career, Haken did a stint tending bar. He remembers that when restaurants transitioned from meal service to just drink service on the busiest nights, there could be two or three rows of customers waiting at the bar to place drink orders. Typically, on those busy nights, there was at least an order of magnitude more customers than bartenders.
+→ Full treatment of exponential backoff, jitter, retry budgets, and the eight failure modes that make retries necessary in [Retry Strategies That Don't Make Things Worse](/course/traffic-management/timeouts-retries-backoff).
 
-Bartenders needed to control the rate of orders to avoid the situation where all customers shouted their orders at the same time and overwhelmed the bar staff. They controlled the rate of drink orders by calmly walking up and down the bar, deciding who they'd ask, "What would you like?"
+## Observability
 
-This put the **smaller group (bartenders) in control** of the demands of the larger group (customers). The bartenders were **pulling** orders from customers instead of letting orders be **pushed** to them.
+Restaurants have a front-of-house manager and a back-of-house manager because each sees a different part of the operation. If you only watch the kitchen, you miss the line forming at the door.
 
-### Control Plane and Data Plane at AWS
+Operating resilient distributed systems requires the same diverse perspectives — client-side, server-side, dependency-side, and per-fault-domain dimensions (per-API, per-AZ, per-customer). Aggregate metrics hide problems; dimensioned metrics surface them.
 
-Haken was reminded of this strategy when thinking about interactions between the control plane and data plane in AWS services. Most AWS services are divided into these components:
-
-**Control plane**: Provides administrative and configuration functions of the service, such as creating, updating, and deleting resources. Expected to be used at much lower volume than the data plane, so control plane fleets are considerably smaller.
-
-**Data plane**: Provides the core day-to-day functionality of the provisioned resource. Expected to handle much higher volume, so data plane fleets are considerably larger.
-
-The data plane relies on information from the control plane for its operation. AWS carefully considers whether the data plane should **pull** that information from the control plane, or whether the control plane should **push** the information to the data plane.
-
-Typically, AWS decides to **put the smaller fleet in control**, meaning choosing to push from the control plane to the data plane. This prevents the larger data plane fleet from overwhelming the control plane fleet.
-
-<Mermaid title="Small Control Plane Fleet Pushing Updates to Large Data Plane" chart={`graph TD
-    CP1[Control Plane<br/>Server 1] -->|Push updates| DP1[Data Plane<br/>Server 1]
-    CP1 -->|Push updates| DP2[Data Plane<br/>Server 2]
-    CP2[Control Plane<br/>Server 2] -->|Push updates| DP3[Data Plane<br/>Server 3]
-    CP2 -->|Push updates| DP4[Data Plane<br/>...]
-    CP3[Control Plane<br/>Server 3] -->|Push updates| DPN[Data Plane<br/>Server N]
-
-    style CP1 fill:#e1f5ff,color:#1a1a1a
-    style CP2 fill:#e1f5ff,color:#1a1a1a
-    style CP3 fill:#e1f5ff,color:#1a1a1a
-    style DP1 fill:#fff4e1,color:#1a1a1a
-    style DP2 fill:#fff4e1,color:#1a1a1a
-    style DP3 fill:#fff4e1,color:#1a1a1a
-    style DP4 fill:#fff4e1,color:#1a1a1a
-    style DPN fill:#fff4e1,color:#1a1a1a
-`} />
-
-This strategy allows AWS to maintain separate components within a service that are scaled independently based on their own needs, while still allowing them to interact in a way that avoids potential overload.
-
-But this strategy has its challenges:
-
-- The larger fleet needs to maintain all of the data pushed to it from the smaller fleet and implement recovery mechanisms should the data become lost or corrupted
-- The smaller fleet needs to maintain an inventory of every node in the larger fleet and equally share work pushing updates
-- The smaller fleet needs to manage the convergence of updates to ensure nodes in the larger fleet that are temporarily unavailable still receive them
-
-## Well-Behaved Clients: Circuit Breakers
-
-Despite best efforts, on rare occasions the kitchen became overwhelmed and couldn't keep up with customer demand. In the worst cases, staff stopped food service (pausing acceptance of new orders) to allow cooks to finish the meals already in their queue. After food started coming out on time again, they started accepting new orders.
-
-While the kitchen was under duress, the wait staff tried to be well-behaved clients by not adding to the kitchen's load. But this approach sometimes introduced the unintended impact of making a small problem bigger. If they stopped food service because the grill station was backed up, but the deep fryer and salad station weren't experiencing delay, they'd unnecessarily stopped taking orders that could still be fulfilled. This would negatively impact tables that just wanted salads or French fries.
-
-### Circuit Breaker Pattern
-
-In distributed systems, this approach to preventing sustained overload of a dependency in duress is called the **circuit breaker pattern**. This pattern mimics how circuit breakers are used in electrical systems to prevent too much current from being applied to a single electrical circuit.
-
-Circuit breakers in software have three states:
-
-**Closed state**: Requests flow normally to the dependency. This is the default, healthy state.
-
-**Open state**: The dependency crossed a latency or failure threshold. Requests are blocked immediately without even attempting to contact the dependency. This gives the dependency time to recover.
-
-**Half-open state**: After a period of backoff, a small percentage of requests are sent to the dependency to gauge its health. If responses are within the healthy threshold, the circuit breaker closes. If not, it transitions back to open.
-
-<Mermaid title="Circuit Breaker State Machine" chart={`stateDiagram-v2
-    [*] --> Closed: Initial State
-    Closed --> Open: Failure threshold exceeded
-    Open --> HalfOpen: After backoff period
-    HalfOpen --> Closed: Dependency healthy
-    HalfOpen --> Open: Still unhealthy
-    Closed --> Closed: Normal operation
-
-    note right of Closed
-        Requests flow normally
-        Monitor failure rate
-    end note
-
-    note right of Open
-        Block all requests
-        Wait for backoff period
-    end note
-
-    note right of HalfOpen
-        Allow limited requests
-        Test dependency health
-    end note
-`} />
-
-Circuit breakers help prevent overload in two dimensions:
-
-1. **Stop overwhelming the dependency**: By blocking requests, the circuit breaker prevents the client from continuing to bombard a struggling dependency
-2. **Prevent exhausting client resources**: Circuit breakers help prevent the client from exhausting its own resources like threads, CPU cycles, or network ports through additional concurrency while waiting for requests to the dependency to fail or time out
-
-### The Downside of Circuit Breakers
-
-The potential downside occurs in the situation described at the restaurant—when a small event is made larger. Circuit breakers, when open, choose to fail client requests intentionally without giving the dependency a chance to succeed. Some requests to the dependency might not be affected by the overload at all but are still rejected by the circuit breaker, unnecessarily increasing the failure rate.
-
-For example, if the data store for records starting with A-H is overwhelmed (maybe a new product launch drives everyone to look up the same product starting with A), tripping the circuit breaker stops all requests to the service. However, requests for data starting with I-R and S-Z aren't impacted by the load but are still rejected.
-
-At Amazon, circuit breakers are chosen carefully, and dependencies aren't treated uniformly. A dependency can experience failures in a single partition, fault boundary, host, or customer, among other dimensions. This means AWS circuit breakers are **more granular than the "whole dependency"** and are typically aligned to the dependency's expected fault domains.
-
-This granularity comes at the cost of increased complexity for implementing "mini" circuit breakers, and it requires knowledge of how the dependency is architected or partitioned. Setting the appropriate threshold for the circuit breaker can also be challenging. AWS wants to ensure that a single client being rate-limited or invoking a latent bug doesn't inadvertently trip the circuit breaker for everyone.
-
-Improperly scoped and tuned circuit breakers can make the impact larger, so when AWS chooses to use a circuit breaker to control load, there's extensive and continuous testing and validation of those thresholds to prevent unintentional impact.
-
-## Well-Behaved Clients: Adaptive Retries
-
-When Haken was busy as a server, he could forget things, even if he wrote them down. There were lots of distractions—greeting a new table, dropping off an order, needing to finish some side work. Now, when he's a customer in a restaurant, if his request isn't quickly fulfilled, he typically lets a little time pass to see if the server remembers, and then asks again.
-
-By retrying his request, he can hopefully get the outcome he wants despite temporary distractions for the server. He also wants to bound how frequently and how many times he asks. If he flagged down his server to ask for salad dressing every time they walked by, he would just further delay them from ever getting back to the kitchen. They'd also probably start to get annoyed and might begin ignoring him—effectively rate-limiting his retries.
-
-### The Problem with Simple Retries
-
-In distributed systems, retries can mask transient errors and rate limiting, which transparently improves the perceived availability of a dependency. One common implementation is letting the client retry every request up to N times using exponential backoff with jitter between requests.
-
-The drawback of this approach is that it can add work to the system at a time when the system might be impaired because of overload, causing additional impact. Consider a really impatient customer who wants more salad dressing. Instead of just asking their server once, they ask every server who happens to walk by until their request is fulfilled.
-
-Without explicit coordination among servers, the amount of work being done to bring a single side of salad dressing is multiplied by the number of servers asked. It also likely results in a lot of wasted salad dressing since every server is now bringing the customer an extra side.
-
-This situation gets worse if the request needs to traverse multiple services in a call chain. The work done grows **exponentially** with the number of nodes. The resulting number of calls to the last dependency is k^n where k is the number of retries each node makes and n is the call chain depth.
-
-For example, each service makes up to three requests (1 original and 2 retries). The result is that the final service receives 9 total requests, and the system processes 12 requests overall—a significant amplification of work.
-
-### Adaptive Retries
-
-To reduce work amplification, AWS frequently uses an approach called **adaptive retries** instead. This mode of retries still uses exponential backoff with jitter but adds two protection mechanisms:
-
-**Retry quota (token bucket)**: Each retry takes a quantity of tokens from a bucket. Retries in response to different errors might cost different quantities of tokens. For example, a retry in response to a timeout might require more tokens than a retry due to an internal server error because the former situation might indicate the dependency is overloaded to the point of not being able to respond.
-
-Successful responses allow the token bucket to be refilled with a fraction of the tokens required for a retry (maybe 0.1 or 0.01 tokens—earning 1 retry for every 10 or 100 successful responses, up to the bucket's maximum size). Error responses don't refill tokens. Clients can retry when the error rate is low but are rate-limited when the error rate is higher. This limits the maximum increase in traffic while a dependency is impaired.
-
-**Client-side rate limiting (dynamic token bucket)**: This approach applies to both original requests and retries, focused specifically on requests that have been throttled. The token bucket has a dynamically changing fill rate and capacity. The fill rate and capacity are increased after a successful response, but when a throttling response is received, they're reduced. This helps clients dynamically respond to changing capacity conditions and reduces work amplification on the dependency in response to throttling.
-
-Typically, AWS applies the client-side rate-limiting logic first and then evaluates the available retry quota when a retry is needed.
-
-<Callout type="tip">
-**Adaptive retries strike a balance**: They improve chances of success during transient errors while minimizing additional load applied to a dependency under duress. The AWS CLI and AWS SDK both offer adaptive retries as a built-in feature.
-</Callout>
-
-It's also important that wherever AWS performs rate limiting or uses circuit breakers, they're placed **as close to the source as possible** to most effectively reduce work amplification.
-
-It's not always safe to retry, and adaptive retries help AWS be a well-behaved client by striking a balance between improving the chances of success during transient errors and minimizing the amount of additional load applied to a dependency under duress.
-
-## Operational Visibility
-
-When using any of the strategies summarized in this lesson, good operational visibility is essential to operate resilient systems effectively. In restaurants, there's typically a front-of-house (FOH) manager who manages servers, hosts, and bartenders, and a back-of-house (BOH) manager who manages kitchen staff. These managers continually inspect the performance of each part of the restaurant to understand where backlogs and bottlenecks are, allowing them to select the right reaction to different situations.
-
-In distributed systems at Amazon, the same kind of insights are needed. Several principles guide operational visibility:
-
-### Measure from Diverse Perspectives
-
-Use diverse perspectives to measure the system, just like using FOH and BOH managers. If a restaurant only measured wait times from the kitchen's perspective, it could miss the line of people standing outside. At Amazon, **measuring everywhere is critical** to getting a holistic view of the service and understanding where load is having impact.
-
-This means measuring:
-- Client-side latency and errors
-- Server-side processing time and queue depth
-- Dependency latency and availability
-- Infrastructure metrics (CPU, memory, disk, network)
-
-### Measure Utilization
-
-Resources can run out, so it's important to provide early warning indicators when this is about to happen. These can be things like:
-
-- CPU and memory usage
-- Disk space
-- Thread pool occupancy
-- Queue depth
-- Service quotas
-
-All of these resources can be exhausted through over-utilization. Such overutilization signals excessive load, which AWS prefers to know before resources run out so strategies can be used to prevent customer impact.
-
-### Consider Dimensionality
-
-It's critical to consider the dimensionality of metrics so measurements are precise. A system-wide error rate could mask errors happening in a single API. Instead, AWS wants per-API dimensions in metrics so alarms can be created on the error rate for each one.
-
-AWS also wants to separately measure things that fail separately. For example, an Availability Zone represents a fault domain, so metrics are produced for each Availability Zone to respond to impairments of resources in a single AZ.
-
-In some cases, dimensions might have high cardinality (many unique keys), like hosts in a fleet or customers. This makes creating an alarm and dashboard per unique key unrealistic. AWS commonly combines metrics and logs using Amazon CloudWatch embedded metric format (EMF) and queries those logs using CloudWatch Contributor Insights to find the top-N contributors to some metric.
-
-This allows AWS to answer questions like:
-- "Which individual customers are driving excessive load to a service?"
-- "Is one host producing a lot more latency than all the others?"
-
-### Build a Culture Around Resilience
-
-At Amazon, one mechanism leveraged is weekly reviews of dashboards and metrics. Teams want to ensure they have the right dashboards so operators can act quickly when something goes wrong. They also want to inspect established alarm thresholds and ensure metrics are sufficient. Continuous inspection helps ensure the right level of operational visibility to detect and respond to load events when they occur.
-
-<Callout type="info">
-What AWS has found over the years is that **more visibility is better**. By using a continuous, iterative process to instrument services, better insights can be derived that allow teams to react more quickly with better accuracy and precision.
-</Callout>
+→ Full treatment of instrumentation, dimensions, and structured logging in [End-to-End Instrumentation Strategies](/course/observability/instrumenting-distributed-systems) and dashboard design in [Dashboards for Rapid Incident Response](/course/observability/dashboards-operational-visibility).
 
 ## Conclusion
 
-The primary strategy at Amazon for managing load is proactive forecasting and scaling to stay ahead of customer demand and provide sufficient capacity to handle significant load fluctuations. In the rare circumstances that load exceeds provisioned capacity, the strategies outlined in this lesson paired with the right operational visibility provide substantial control over how to deal with excessive load.
+Amazon's primary strategy for managing load is proactive — forecasting and scaling to stay well ahead of demand. The patterns in this lesson are what kicks in when reality outruns the forecast.
 
-Each strategy has targeted use cases and trade-offs, but using a combination of these approaches allows AWS to mitigate a broad range of overload impacts:
+Each pattern has targeted use cases and trade-offs. Used together, they let AWS deliver consistent customer experience under conditions where naive systems would collapse:
 
-**Operational practices** like load shedding, fairness, and auto-scaling provide reactive defenses when load exceeds expectations.
+- **Operational practices** (load shedding, fairness, auto-scaling) are reactive defenses when load exceeds expectations.
+- **Architectural practices** (constant work, queue management, smaller-service-in-control) build resilience into the design from the start.
+- **Client-side practices** (circuit breakers, adaptive retries) ensure clients don't amplify problems when dependencies struggle.
 
-**Architectural practices** like constant work, queue management, and putting the smaller service in control build resilience into the system's design from the beginning.
-
-**Client-side practices** like circuit breakers and adaptive retries ensure that clients don't amplify problems when dependencies are struggling.
-
-At Amazon, having both well-behaved clients and well-protected services through operational and architectural strategies is critical to building resilient systems that provide a consistent, predictable customer experience. AWS uses a handful of well-tested strategies, usually built into common libraries or services, to simplify the approach and make it easier for engineering teams to adopt and use them.
-
-Whether it's because a service has become an overnight success, a misbehaved client sends too many requests, or any combination of factors, these strategies help ensure AWS services continue to deliver a premium experience even under stress—just like a well-run restaurant during the lunch rush.
+Like a well-run restaurant during the lunch rush, the goal isn't to avoid every difficult moment — it's to handle each one with predictable, practiced responses.
 
 <KeyTakeaways>
-- **Load shedding prevents tipping points**: Intentionally discarding work during overload maintains consistent goodput rather than allowing the system to thrash unproductively, protecting services from becoming completely unresponsive during transient spikes
-- **Fairness maintains single-tenant experience in multi-tenant systems**: Service quotas and rate limiting ensure one customer's excessive load doesn't degrade service for others, though it requires careful tuning to avoid making small problems larger through overly aggressive throttling
-- **Constant work eliminates load-driven variance**: Systems performing the same work regardless of load (like polling configuration files every few seconds) provide utterly predictable performance and natural self-healing properties, trading some efficiency for dramatic reliability improvements
-- **Smaller service in control prevents overwhelming**: Pushing updates from small control planes to large data planes prevents the larger fleet from overwhelming the smaller one with simultaneous pull requests, though it requires careful fleet inventory management and convergence logic
-- **Circuit breakers need granular fault domains**: Aligning circuit breakers to dependency partition boundaries (not whole dependencies) prevents unnecessarily amplifying small failures into large ones, but requires deep knowledge of dependency architecture and careful threshold tuning
-- **Adaptive retries balance availability and amplification**: Retry quotas and client-side rate limiting let systems mask transient errors while preventing retry storms from overwhelming impaired dependencies, with token buckets ensuring retry rates decrease as error rates increase
-- **Operational visibility requires diverse perspectives and precise dimensions**: Measuring from client-side, server-side, and dependency perspectives with per-API, per-AZ, and per-customer dimensions enables accurate detection and response to overload before it causes customer impact
-- **Proactive capacity management is the primary defense**: AWS's substantial investments in forecasting, auto-scaling, and pre-provisioned buffers mean true overload is rare—the strategies in this lesson are safety mechanisms for exceptional events, not primary operating modes
+- **Three categories of resilience patterns**: well-protected services (operational + architectural), well-behaved clients, and observability — they work together, not in isolation
+- **Load shedding keeps goodput flat**: discarding work above the tipping point prevents the system from collapsing into unproductive thrash
+- **Fairness prevents noisy-neighbor cascades**: per-customer quotas and rate limits keep one customer's spike from degrading service for everyone else
+- **Constant work eliminates variability when it matters most**: systems doing the same operations regardless of state don't slow down during failures
+- **Smaller service in control prevents stampedes**: when fleets are asymmetric, letting the smaller fleet set the pace prevents overload that would drop goodput to zero
+- **Circuit breakers need granular fault domains**: aligning them to the dependency's actual partition boundaries prevents amplifying small failures into large ones
+- **Adaptive retries balance availability and amplification**: retry quotas and client-side rate limits prevent retry storms from overwhelming impaired dependencies
+- **Observability requires diverse perspectives and precise dimensions**: per-API, per-AZ, per-customer metrics catch problems that aggregate metrics hide
+- **Proactive capacity management is the primary defense**: these patterns are safety nets for the exceptional cases, not primary operating modes
 </KeyTakeaways>

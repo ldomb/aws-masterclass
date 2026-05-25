@@ -131,34 +131,11 @@ These operations are fundamentally simpler than control plane operations. The da
 
 This separation has profound implications for availability. Because data planes are simpler, they can be designed to target higher availability than control planes. More importantly, this enables a critical pattern called **static stability**.
 
-### Static Stability: Operating Without Changes
+### Static stability builds on this separation
 
-Static stability means that systems continue operating normally in their current state, even when dependencies become impaired. A statically stable system doesn't need to make changes to recover from failures—it's already prepared for them.
+Because data planes don't depend on control planes for normal operation, services can be designed to continue operating through control-plane impairments — a property called **static stability**. An EC2 instance keeps routing packets even if `RunInstances` is down; an S3 bucket keeps serving objects even if `CreateBucket` is degraded.
 
-Consider an EC2 instance running in your VPC. Once launched, that instance operates independently of the EC2 control plane. It doesn't need to make API calls to continue running or to reboot. The physical server hosting the instance has local access to all routing information needed to send and receive packets, both inside the VPC and to the internet.
-
-Even if the EC2 control plane becomes impaired and can't launch new instances, existing instances continue operating normally. They route traffic according to VPC route tables, read and write to EBS volumes, and maintain network connectivity—all data plane operations that don't depend on the control plane.
-
-This principle extends throughout AWS service design:
-
-- An **S3 bucket**, once created, serves GET and PUT requests through the data plane regardless of control plane availability
-- A **running RDS database** continues processing queries even if you can't modify its configuration
-- **VPC networking** continues routing traffic according to existing route tables
-- **ELB load balancers** continue distributing traffic to healthy targets
-- **Lambda functions** continue executing even if you can't deploy new versions
-
-<Callout type="tip">
-The most reliable recovery mechanisms are those that require the fewest changes. By pre-provisioning capacity and avoiding dependencies on control planes during failure scenarios, you create systems that are statically stable and more resilient.
-</Callout>
-
-For customers building on AWS, implementing static stability means designing systems that don't depend on control plane operations to recover from failures:
-
-- Instead of launching new instances when an Availability Zone fails, pre-provision enough capacity in other zones to handle the load
-- Instead of creating ELBs during an outage, have them already deployed in your disaster recovery Region
-- Instead of modifying DNS records to perform failover, use Route 53 health checks to automatically route away from unhealthy endpoints
-- Instead of updating IAM policies during an incident, pre-provision "break-glass" users with necessary permissions
-
-This approach trades some additional cost (for pre-provisioned resources) for significantly improved reliability during failure scenarios. The trade-off is worthwhile for production workloads where recovery time objectives (RTOs) matter.
+The full pattern, including the active-active 50%-overprovisioning capacity model and active-standby failover for stateful services, is covered in [Designing for Static Stability](/course/fault-isolation/static-stability-availability-zones).
 
 ## AWS Service Types and Fault Boundaries
 

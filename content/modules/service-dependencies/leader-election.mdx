@@ -383,29 +383,11 @@ Systems must make work durable before claiming it succeeded. If a leader complet
 
 ### Idempotency: The Key to Graceful Recovery
 
-**Idempotency** is essential for handling leader failures gracefully. It allows the new leader to confidently redrive work that the outgoing leader may have:
-- Partially completed
-- Fully completed but not reported
-- Not started at all
+**Idempotency** is what makes leader failover practical. When a new leader takes over from a crashed predecessor, it has no reliable way to tell which downstream operations the old leader completed — partially, fully-but-unreported, or not at all. Without idempotent downstream APIs, the new leader has to choose between potential data loss and potential duplicate side effects (double charges, duplicate orders).
 
-With idempotent operations, duplicate work is safe. The new leader can simply retry everything that might have been incomplete. If the old leader already completed the work, retrying causes no harm. If it didn't complete the work, retrying completes it.
+With idempotent downstream operations, the new leader can simply re-drive every step that might have been incomplete. Operations that already happened return "already done" without re-executing. Failover collapses from a complex coordination problem into a retry loop.
 
-Back to our order processing example with idempotent operations:
-1. Old leader reserved inventory (assigned idempotent request ID: "order-123-inventory")
-2. Old leader charged payment (request ID: "order-123-payment")
-3. Old leader crashed before shipping
-4. New leader takes over, retries everything:
-   - Reserve inventory with ID "order-123-inventory" → inventory service: "already done, returning success"
-   - Charge payment with ID "order-123-payment" → payment service: "already done, returning success"
-   - Call shipping with ID "order-123-shipping" → shipping service: "processing..."
-5. Order completes correctly
-
-Without idempotency, the new leader faces a nightmare:
-- Did the old leader charge payment? Should we charge again? (Can't risk double-charging!)
-- Did it reserve inventory? Should we reserve again? (Can't risk double-reserving!)
-- How do we know what was completed?
-
-Idempotency transforms leader failover from a complex coordination problem into a simple retry loop.
+→ Full treatment of caller-provided idempotency tokens, ACID requirements, and semantically equivalent responses in [Designing Idempotent APIs for Safe Retries](/course/traffic-management/idempotent-apis).
 
 ### Zero Leaders vs. Two Leaders: Choosing Your Guarantees
 
