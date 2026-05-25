@@ -2,6 +2,8 @@
 
 An interactive course on AWS reliability, fault isolation, and distributed systems patterns.
 
+![AWS Masterclass home page](public/screenshot.png)
+
 ## Prerequisites
 
 - [Node.js](https://nodejs.org/) v20+
