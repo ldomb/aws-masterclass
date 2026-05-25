@@ -1,0 +1,491 @@
+## Introduction
+
+When interviewing at Amazon, Clare Liguori asked a crucial question: "How often do you deploy to production?" Coming from a team that released major versions once or twice yearly—spending hours carefully managing each deployment and frantically checking logs afterward—she wanted to understand the operational reality of Amazon's continuous deployment practices.
+
+The answer surprised her: changes deploy automatically to production multiple times per day through CI/CD pipelines. But the truly remarkable part? "Usually none" was the response when asked how much time developers spend watching deployments. Most deployments aren't actively monitored by anyone because the pipelines themselves handle deployment safety through automated testing and monitoring.
+
+This capability represents the culmination of Amazon's journey to continuous delivery. By building extensive safety automation into pipelines, teams can trust that their changes will deploy cautiously and safely to production without active human oversight. The last time a developer touches or reviews code is when it's merged into the repository—everything after that is automated orchestration.
+
+## How Safe Continuous Deployment Frees Developer Time
+
+Since joining Amazon, Clare has seen first-hand how continuous deployment pipelines help teams deploy quickly and safely while freeing up developer time from deployment work. When developers push production code into the main branch of their service's source code repository, they usually forget about it and go on to their next task, while the pipeline takes over getting that change into production.
+
+The release of code changes to production services is fully automated by the pipeline, which means **the last time any developer touches or reviews a piece of code is when it is merged into the source code repository**.
+
+Teams set up pipelines with automated steps that deploy changes safely to production so developers don't have to watch each deployment. The pipeline runs the latest changes through a set of tests and deployment safety checks. These automated steps prevent customer-impacting defects from reaching production and limit the impact of defects on customers if they do reach production.
+
+<Callout type="info">
+As a developer, you're able to trust that the pipeline will cautiously and safely deploy your change to production for you, without the need for you to actively watch it. This trust is built on layers of automated safety mechanisms throughout the pipeline.
+</Callout>
+
+## The Journey to Continuous Delivery
+
+Amazon didn't start out practicing continuous delivery, and developers used to spend hours and days managing deployments of their code to production. The company adopted continuous delivery across the organization as a way to automate and standardize how they deployed software and to reduce the time it took for changes to reach production.
+
+Improvements to the release process built up incrementally over time. Teams identified deployment risks and found ways to mitigate those risks through new safety automation in pipelines. They continue to iterate on the release process by identifying new risks and new ways of improving deployment safety.
+
+The journey wasn't instantaneous—it was a gradual transformation driven by:
+- **Identifying pain points** in manual deployment processes
+- **Experimenting with automation** to reduce operational burden
+- **Learning from failures** and building safety mechanisms
+- **Sharing best practices** across teams
+- **Continuously improving** pipeline design and tooling
+
+## The Four Pipeline Phases
+
+A typical continuous delivery pipeline at Amazon has four major phases that a code change progresses through on its way to production: **source, build, test, and production**. Understanding what happens in each phase reveals how automation creates deployment safety.
+
+<Mermaid title="Pipeline Phases: Source, Build, Test, Production" chart={`graph LR
+    A[Source] --> B[Build]
+    B --> C[Test]
+    C --> D[Production]
+    style A fill:#e1f5ff,color:#1a1a1a
+    style B fill:#fff4e1,color:#1a1a1a
+    style C fill:#e1ffe1,color:#1a1a1a
+    style D fill:#ffe1e1,color:#1a1a1a
+`} />
+
+### Phase 1: Source
+
+Pipelines at Amazon validate and deploy **any type of change**, not just application code. Version-controlled sources include:
+
+- **Application code** - The primary service logic
+- **Website static assets** - HTML, CSS, JavaScript, images
+- **Tools and tests** - Testing frameworks, deployment scripts
+- **Infrastructure as code** - CloudFormation, Terraform templates
+- **Configuration files** - Service settings, parameters
+- **Feature flags** - Runtime behavior toggles
+- **Underlying operating system** - Base images, security patches
+
+Each source type has its own pipeline with the same safety mechanisms (like automatic rollback) used for application code. For example, configuration values that can change at runtime—like API rate limits and feature flags—deploy through a **dedicated configuration pipeline**. If a configuration change causes production issues (like failing to parse a file), it automatically rolls back.
+
+<Callout type="tip">
+A typical microservice might have five separate pipelines: application code, infrastructure, OS patching, configuration/feature flags, and operator tools. This separation means issues blocking one pipeline don't prevent other changes from reaching production.
+</Callout>
+
+Source code dependencies (libraries, programming languages, parameters like AMI IDs) are **automatically upgraded to the latest version at least weekly**. This prevents dependency drift and ensures teams benefit from security patches and improvements without manual intervention.
+
+### Code Review: The Last Manual Gate
+
+All changes going to production start with **code review**, which must be approved by a team member before merging to mainline (Amazon's version of "master" or "trunk"). The pipeline enforces this requirement—it will block unreviewed commits from deploying.
+
+With fully automated pipelines, **code review is the last manual review before production**. This makes it critical. Reviewers evaluate not just code correctness, but whether the change can be safely deployed. They check for:
+
+- **Sufficient tests** (unit, integration, canary)
+- **Adequate instrumentation** for deployment monitoring
+- **Rollback safety**
+- **Deployment readiness**
+
+Some teams use custom checklists automatically added to each code review to explicitly check for deployment safety concerns:
+
+```markdown
+## Testing
+[ ] Did you write new unit tests for this change?
+[ ] Did you write new integration tests for this change?
+Include the test commands you ran locally to test this change:
+```
+mvn test && mvn verify
+```
+
+## Monitoring
+[ ] Will this change be covered by our existing monitoring?
+    (no new canaries/metrics/dashboards/alarms are required)
+[ ] Will this change have no (or positive) effect on resources and/or limits?
+    (including CPU, memory, AWS resources, calls to other services)
+[ ] Can this change be deployed to Prod without triggering any alarms?
+
+## Rollout
+[ ] Can this change be merged immediately into the pipeline upon approval?
+[ ] Are all dependent changes already deployed to Prod?
+[ ] Can this change be rolled back without any issues after deployment to Prod?
+```
+
+This checklist ensures reviewers explicitly consider deployment safety, not just functional correctness.
+
+### Phase 2: Build and Unit Tests
+
+In the build stage, code is compiled and unit tested. Build tools and build logic can vary from language to language and even from team to team. Teams can choose:
+- Unit test frameworks
+- Linters
+- Static analysis tools
+- Minimum acceptable code coverage thresholds
+
+The tools and types of tests that run will also vary depending on the type of code deployed by the pipeline. For example, unit tests are used for application code and linters are used for infrastructure as code templates.
+
+**All builds run without network access** to isolate the builds and encourage build reproducibility. Typically, unit tests mock (simulate) all their API calls to dependencies, such as other AWS services. Interactions with "live" non-mocked dependencies are tested later in the pipeline in integration tests.
+
+Compared to integration tests, unit tests with mocked dependencies are able to exercise edge cases like:
+- Unexpected errors returned from API calls
+- Network timeouts
+- Rate limiting scenarios
+- Invalid responses
+
+This ensures graceful error handling in the code. When the build is complete, the compiled code is **packaged and signed** to create an immutable artifact.
+
+### Phase 3: Test Deployments in Pre-Production
+
+Before deploying to production, the pipeline deploys and validates changes in multiple pre-production environments: **alpha, beta, and gamma**. Each environment serves a specific purpose in the validation chain.
+
+**Alpha and Beta Environments**: Validate that the latest code functions as expected by running functional API tests and end-to-end integration tests. These environments focus on **functional correctness**.
+
+**Gamma Environment**: Validates that the code is both functional **and** that it can be safely deployed to production. Gamma is as production-like as possible, including:
+- The same deployment configuration as production
+- The same monitoring and alarms as production
+- The same continuous canary testing as production
+- Deployment in multiple AWS Regions to catch potential impact from regional differences
+
+<Mermaid title="Pre-Production Stage Progression" chart={`graph LR
+    A[Build] --> B[Alpha: Functional Tests]
+    B --> C[Beta: Integration Tests]
+    C --> D[Gamma: Production-Like]
+    D --> E[Production]
+    style D fill:#ffe1e1,color:#1a1a1a
+`} />
+
+### Integration Tests: Exercising the Full Stack
+
+Integration tests help Amazon automatically use a service just like customers do as part of the pipeline. These tests **exercise the full stack end-to-end** by calling real APIs running on real infrastructure in each pre-production stage for all meaningful customer scenarios. The aim of integration testing is to catch any unexpected or incorrect behavior of the service before deploying to production.
+
+While unit tests run against mocked dependencies, **integration tests run against a pre-production system that calls real dependencies**, validating the assumptions of the mocks about how those dependencies behave. Integration tests validate:
+
+- **Behavior of individual APIs** across different inputs
+- **Full workflows** that join multiple APIs (like creating a new resource, describing the new resource until it is ready, and then using the resource)
+- **Positive test cases** with valid inputs
+- **Negative test cases** with invalid inputs, checking that appropriate errors are returned
+
+Some pipelines run a **fuzz test** to generate many possible API inputs and validate that they don't cause any internal failures in the service. Some pipelines also run a **short load test** in a pre-production stage to ensure that the latest changes don't cause any latency or throughput regressions at real load levels.
+
+### Backward Compatibility and One-Box Testing
+
+Before deploying to production, Amazon needs to ensure that the latest code is **backward-compatible** and can be safely deployed alongside the current code. For example, teams need to detect whether the latest code writes data in a format that the current code can't parse.
+
+The **one-box stage** in gamma deploys the latest code to the smallest unit of deployment:
+- A single virtual machine
+- A single container
+- A small percentage of AWS Lambda function invocations
+
+This one-box deployment leaves the rest of the gamma environment deployed with the current code for some period of time, such as 30 minutes or one hour. Traffic doesn't have to be specially driven to the one-box. It can be added to the same load balancer or poll the same queue as the rest of the gamma environment.
+
+<Mermaid title="Gamma One-Box: New Code Deployed to 1 of 10 Containers" chart={`graph LR
+    A[Gamma Fleet<br/>10 Containers] --> B[9 Containers<br/>Current Code v1.5]
+    A --> C[1 Container<br/>New Code v1.6]
+    B --> D[Load Balancer]
+    C --> D
+    D --> E[Canary Tests<br/>Monitor Mixed Fleet]
+    style C fill:#90EE90,color:#1a1a1a
+    style E fill:#FFE4B5,color:#1a1a1a
+`} />
+
+For example, in a gamma environment of ten containers behind a load balancer, the one-box receives ten percent of the gamma traffic generated by continuous canary tests. The one-box deployment monitors canary test success rates and service metrics to detect any impact from:
+- The deployment itself
+- Having a "mixed" fleet deployed side by side
+
+### Cross-Service Dependency Management
+
+Amazon also needs to ensure that the latest code is backward-compatible with dependencies. For example, if a change needs to be made across microservices in a specific order.
+
+Microservices in pre-production environments typically:
+- **Call the production endpoint** of any services owned by another team (like Amazon S3 or DynamoDB)
+- **Call the pre-production endpoint** of the service team's other microservices in the same stage
+
+For example, a team's microservice A in gamma calls the same team's microservice B in gamma, but it calls the production endpoint for Amazon S3.
+
+Some pipelines also run integration tests again in a separate backward-compatibility stage called **zeta**, which is a separate environment where each microservice calls only production endpoints, testing that changes going to production are compatible with the code currently deployed in production across multiple microservices. For example, microservice A in zeta calls microservice B's prod endpoint and the production endpoint for Amazon S3.
+
+## Production Deployments: Limiting Blast Radius
+
+Amazon's **#1 objective for production deployments** is to **prevent negative impact to multiple Regions simultaneously and to multiple Availability Zones in the same Region**. Limiting the scope of each deployment limits potential customer impact.
+
+To limit the scope of automatic deployments, teams split the production phase into many stages and many deployments to individual Regions. Teams split regional deployments into even smaller-scoped deployments by deploying to individual Availability Zones or to their service's individual internal shards (called **cells**) in their pipeline, to further limit the scope of potential impact from a failed production deployment.
+
+### Staggered Deployments Through Waves
+
+Each team needs to balance the safety of small-scoped deployments with the speed at which they can deliver changes to customers in all Regions. Deploying changes to 24 Regions or 76 Availability Zones through the pipeline one at a time has the lowest risk of causing broad impact, but it could take weeks for the pipeline to deliver a change to customers globally.
+
+Amazon has found that grouping deployments into **waves of increasing size** helps achieve a good balance between deployment risk and speed. Each wave's stage in the pipeline orchestrates deployments to a group of Regions, with changes being promoted from wave to wave.
+
+New changes can enter the production phase of the pipeline at any time. After a set of changes is promoted from the first step to the second step in wave 1, the next set of changes from gamma is promoted into the first step of wave 1, so teams don't end up with large bundles of changes waiting to be deployed to production.
+
+| Wave | Regions | Deployment Strategy | Purpose |
+|------|---------|---------------------|---------|
+| **Wave 1** | 1 Region | Low traffic, one AZ at a time | Build initial confidence |
+| **Wave 2** | 1 Region | High traffic, one AZ at a time | Validate at real scale |
+| **Wave 3** | 3 Regions | Parallel, one AZ at a time per Region | Cautious expansion |
+| **Wave 4** | 12 Regions | Parallel, one AZ at a time per Region | Broad deployment |
+| **Wave 5** | Remaining | Parallel, one AZ at a time per Region | Complete coverage |
+
+The first two waves in the pipeline build the most confidence in the change:
+
+**Wave 1** deploys to a Region with a low number of requests to limit the possible impact of the first production deployment of the new change. The wave deploys to only one Availability Zone (or cell) at a time within that Region to cautiously deploy the change across the Region.
+
+**Wave 2** then deploys to one Availability Zone (or cell) at a time in a Region with a high number of requests where it is highly likely that customers will exercise all the new code paths and where teams get good validation of the changes.
+
+After teams have higher confidence in the safety of the change from the initial pipeline waves' deployments, they can deploy to more and more Regions in parallel in the same wave.
+
+<Callout type="tip">
+The exact number and choice of Regions in each of these waves and the number of waves in a service team's pipeline depend on the individual service's usage patterns and scale. Later waves still maintain the objective to prevent negative impact to multiple Availability Zones in the same Region—each step in the wave only deploys to a single Availability Zone or cell from each Region in the wave.
+</Callout>
+
+### One-Box and Rolling Deployments
+
+Deployments to each production wave start with a **one-box stage**. As in the gamma one-box stage, each prod one-box stage deploys the latest code to one box (a single virtual machine, single container, or a small percentage of Lambda function invocations) in each of the wave's Regions or Availability Zones.
+
+The prod one-box deployment minimizes the potential impact of changes on the wave by initially limiting the requests that are served by the new code in that wave. Typically, the one box serves **at most ten percent** of overall requests for the Region or Availability Zone. If the change causes a negative impact in the one box, the pipeline automatically rolls back the change and doesn't promote it to the rest of the prod stages.
+
+After the one-box stage, most teams use **rolling deployments** to deploy to the wave's main production fleet. A rolling deployment ensures that the service has enough capacity to serve the production load throughout the deployment. It controls the rate at which the new code is put into service (that is, when it starts serving production traffic) to limit the impact of changes.
+
+### Rolling Deployment Mechanics
+
+In a typical rolling deployment to a Region, **at most 33 percent** of the service's boxes in that Region (containers, Lambda invocations, or software running on virtual machines) are replaced with the new code.
+
+During a deployment, the deployment system:
+
+1. **Chooses an initial batch** of up to 33% of boxes to replace with the new code
+2. **Maintains at least 66% capacity** that is healthy and serving requests during the replacement
+3. **Determines that a box in the initial batch** is passing health checks before replacing the next box
+4. **Continues replacements** while maintaining a minimum of 66% capacity at all times
+
+All services are scaled to withstand losing an Availability Zone in the Region, so teams know that the service can still serve production load at 66% capacity. To further limit the impact of changes, some teams' pipelines deploy as little as **five percent** of their boxes at a time. However, they do fast rollbacks, where the system replaces 33% of the boxes at a time with the previous code to speed up rollback.
+
+<Mermaid title="Rolling Deployment in Three Batches" chart={`graph LR
+    A[100% Old] --> B[Deploy<br/>Batch 1]
+    B --> C[66% Old<br/>33% New]
+    C --> D[Health<br/>check]
+    D --> E[Deploy<br/>Batch 2]
+    E --> F[33% Old<br/>66% New]
+    F --> G[Health<br/>check]
+    G --> H[Deploy<br/>Batch 3]
+    H --> I[100% New]
+    style I fill:#90EE90,color:#1a1a1a
+`} />
+
+**Try it yourself:** Experiment with the interactive simulation below to see how deployment strategies like one-box, rolling, and wave-based deployments work in practice.
+
+<DeploymentSimulator />
+
+## Metrics Monitoring and Auto-Rollback
+
+Automated deployments in the pipeline typically **don't have a developer who actively watches** each deployment to prod, checks the metrics, and manually rolls back if they see issues. These deployments are completely **hands-off**. The deployment system actively monitors an alarm to determine if it needs to automatically roll back a deployment.
+
+A rollback will switch the environment back to:
+- The container image
+- The AWS Lambda function deployment package
+- The internal deployment package
+
+that was previously deployed. Amazon's internal deployment packages are similar to container images, because the packages are immutable and use a checksum to verify their integrity.
+
+### High-Severity Alarms
+
+Each microservice in each Region typically has a **high-severity alarm** that triggers on thresholds for:
+- **Customer-impacting metrics** (like fault rates and high latency)
+- **System health metrics** (like CPU utilization)
+
+This high-severity alarm is used to:
+1. Page the on-call engineer
+2. Automatically roll back the service if a deployment is in progress
+
+Often, the rollback is already in progress by the time the on-call engineer has been paged and starts engaging.
+
+**Example High-Severity Microservice Alarm:**
+
+```
+ALARM("FrontEndApiService_High_Fault_Rate") OR
+ALARM("FrontEndApiService_High_P50_Latency") OR
+ALARM("FrontEndApiService_High_P90_Latency") OR
+ALARM("FrontEndApiService_High_P99_Latency") OR
+ALARM("FrontEndApiService_High_Cpu_Usage") OR
+ALARM("FrontEndApiService_High_Memory_Usage") OR
+ALARM("FrontEndApiService_High_Disk_Usage") OR
+ALARM("FrontEndApiService_High_Errors_In_Logs") OR
+ALARM("FrontEndApiService_High_Failing_Health_Checks")
+```
+
+### Aggregate Alarms for Cross-Service Impact
+
+Changes introduced by a deployment can have an impact on **upstream and downstream microservices**, so the deployment system needs to monitor the high-severity alarm for the microservice under deployment **and** monitor the high-severity alarms for the team's other microservices to determine when to roll back.
+
+Deployed changes can also affect the metrics of continuous canary testing, so the deployment system additionally needs to monitor for failing canary tests.
+
+To automatically roll back on all of these possible areas of impact, teams create **high-severity aggregate alarms** for the deployment system to monitor. High-severity aggregate alarms roll up the state of:
+- All of the team's individual microservice high-severity alarms
+- The state of the canary alarms
+
+into a single aggregate state.
+
+**Example High-Severity Aggregate Rollback Alarm:**
+
+```
+ALARM("FrontEndApiService_High_Severity") OR
+ALARM("BackendApiService_High_Severity") OR
+ALARM("BackendWorkflows_High_Severity") OR
+ALARM("Canaries_High_Severity")
+```
+
+If **any** of the high-severity alarms for the team's microservices go into the alarm state, **all** of the team's ongoing deployments across all of their microservices in that Region automatically roll back.
+
+### One-Box Specific Alarms
+
+A one-box stage serves a small percentage of overall traffic, so issues introduced by a one-box deployment might not trigger the service's high-severity rollback alarm. To catch and roll back changes that cause issues in the one-box stage before they reach the rest of the prod stages, one-box stages additionally roll back on **metrics that are scoped to only the one box**.
+
+For example, they roll back on the fault rate of the requests that were served specifically by the one box, which makes up a small percentage of overall number of requests.
+
+**Example One-Box Rollback Alarm:**
+
+```
+ALARM("High_Severity_Aggregate_Rollback_Alarm") OR
+ALARM("FrontEndApiService_OneBox_High_Fault_Rate") OR
+ALARM("FrontEndApiService_OneBox_High_P50_Latency") OR
+ALARM("FrontEndApiService_OneBox_High_P90_Latency") OR
+ALARM("FrontEndApiService_OneBox_High_P99_Latency") OR
+ALARM("FrontEndApiService_OneBox_High_Cpu_Usage") OR
+ALARM("FrontEndApiService_OneBox_High_Memory_Usage") OR
+ALARM("FrontEndApiService_OneBox_High_Disk_Usage") OR
+ALARM("FrontEndApiService_OneBox_High_Errors_In_Logs") OR
+ALARM("FrontEndApiService_OneBox_Failing_Health_Checks")
+```
+
+### Anomaly Detection
+
+In addition to rolling back on alarms defined by the service team, Amazon's deployment system can also **detect and automatically roll back on anomalies** in common metrics emitted by the internal web service framework.
+
+Most microservices emit metrics such as:
+- Request count
+- Request latency
+- Fault count
+
+in a standard format. Using these standard metrics, the deployment system can roll back automatically if there are anomalies in the metrics during a deployment. Examples include:
+- If the request count suddenly drops to zero
+- If the latency becomes much higher than normal
+- If the number of faults becomes much higher than normal
+
+## Bake Time: Catching Slow-Burning Issues
+
+Sometimes a negative impact caused by a deployment is not readily apparent. It's **slow burning**—it doesn't show up immediately during the deployment, especially if the service is under low load at the time.
+
+Promoting the change to the next pipeline stage immediately after the deployment is complete can end up having an impact in multiple Regions by the time the impact surfaces in the first Region.
+
+Before promoting a change to the next production stage, each prod stage in the pipeline has **bake time**, which is when the pipeline continues to monitor the team's high-severity aggregate alarm for any slow burning impact after a deployment is completed and before moving on to the next stage.
+
+### Calculating Bake Time
+
+To calculate the amount of time spent baking a deployment, teams need to balance:
+- The risk of causing a broader impact if promoting changes to multiple Regions too quickly
+- The speed at which they can deliver changes to customers globally
+
+Amazon has found that a good way to balance these risks is for:
+- **Earlier waves** in the pipeline to have a **longer bake time** while building confidence in the safety of the change
+- **Later waves** to have a **shorter bake time**
+
+The goal is to minimize the risk of an impact that affects multiple Regions. Because most deployments are not actively watched by a team member, the typical pipeline's **default bake times are conservative** and will deploy a change to all Regions in about **four or five business days**. Services that are larger or highly critical have even more conservative bake times.
+
+| Stage | Bake Time | Rationale |
+|-------|-----------|-----------|
+| One-box stages | At least 1 hour | Initial production validation |
+| First regional wave | At least 12 hours | Build substantial confidence |
+| Subsequent waves | 2-4 hours each | Balance safety with speed |
+| Individual Regions/AZs/cells | Additional time | Granular validation |
+
+<Callout type="warning">
+Bake time includes requirements to wait for a specific number of data points in the team's metrics (for example, "wait for at least 100 requests to the Create API") to ensure that enough requests have occurred to make it likely that the new code has been fully exercised.
+</Callout>
+
+During the entire bake time, the deployment is automatically rolled back if the team's high-severity aggregate alarm goes into the alarm state.
+
+### Accelerated Deployments for Urgent Changes
+
+Though extremely rare, in some cases an urgent change (like a security fix or a mitigation for a large-scale event affecting service availability) might need to be delivered to customers more quickly than the time the pipeline usually takes to bake changes and deploy.
+
+In these cases, teams can **dial down the pipeline's bake time** to accelerate the deployment, but they require a **high level of scrutiny** on the change. Teams require the scrutiny of the organization's **Principal Engineers**. The team must review:
+- The code change
+- Its urgency
+- Risk of impact
+
+with very experienced developers who are experts at operational safety.
+
+The change still goes through the same steps in the pipeline as usual, but gets promoted to the next stage more quickly. Teams manage the risk of a faster deployment by:
+- Limiting the changes in flight in the pipeline during this time to allow only the most minimal code changes needed to address the current issue
+- Actively watching the deployments
+
+## Deployment Blockers
+
+The pipeline prevents automatic deployments to production when there is a higher risk of causing a negative impact. The pipeline uses a set of **blockers** that evaluate deployment risk.
+
+### Alarm Blockers
+
+Automatically deploying a new change to prod when an issue is currently ongoing in the environment could make the impact worse or more prolonged. Before starting a new deployment to any prod stage, the pipeline checks the team's high-severity aggregate alarm to determine whether there are any active issues.
+
+If the alarm is currently in the alarm state, the pipeline **prevents the change from moving forward**. Pipelines can also check organization-wide alarms, like a large-scale event alarm that indicates whether there is a broad impact in another team's systems, and prevents starting a new deployment that could add to the overall impact.
+
+These deployment blockers can be overridden by developers when a change needs to be deployed to prod to recover from a high-severity issue.
+
+### Time Window Blockers
+
+The pipeline is configured with a set of **time windows** that define when a deployment is allowed to start. When configuring time windows, teams need to balance two causes of deployment risk:
+
+1. **Very small time windows** can cause changes to pile up in the pipeline while the time window is closed, increasing the likelihood that any one of those changes in the next deployment will have an impact when the time window opens
+
+2. **Very large time windows** that go beyond regular business hours increase the risk of prolonging the impact from a failed deployment. During off-hours, it takes longer to engage the on-call engineer than during the day, when the on-call engineer and other team members are working
+
+Most deployments aren't actively watched by a team member, so Amazon optimizes the timing of deployments to **minimize the time it takes to engage an on-call engineer**, in case there is manual action required for recovery after an automatic rollback.
+
+On-call engineers typically take longer to engage:
+- At night
+- On office holidays
+- On weekends
+
+So these times are **excluded from the time windows**.
+
+Depending on the usage patterns of the service, some issues might not surface for hours after the deployment, so many teams also **exclude Fridays and late-afternoon deployments** from their time windows to reduce the risk of needing to engage the on-call engineer at night or during the weekend after a deployment.
+
+Amazon has found that this set of time windows:
+- Enables a fast recovery even when manual action is needed
+- Ensures less engagement with on-call engineers outside of regular working hours
+- Makes sure that a small number of changes is bundled together while the time windows are closed
+
+## Pipelines as Code
+
+The typical AWS service team owns many pipelines to deploy the team's multiple microservices and source types (application code, infrastructure code, OS patches, etc.). Each pipeline has many deployment stages for an ever-increasing number of Regions and Availability Zones.
+
+This translates to a lot of configuration for the team to manage in:
+- The pipeline system
+- The deployment system
+- The alarm system
+
+And a lot of effort to keep up to date with the latest best practices and with new Regions and Availability Zones.
+
+In the last few years, Amazon has embraced practicing **pipelines as code** as a way to more easily and consistently configure safe, up-to-date pipelines by modeling this configuration in code.
+
+### Benefits of Pipelines as Code
+
+Amazon's internal pipelines as code tool:
+- **Pulls from a centralized list** of Regions and Availability Zones to easily add new Regions and Availability Zones to pipelines across AWS
+- **Allows teams to model pipelines using inheritance**, defining configuration that is common across a team's pipelines in a parent class and defining all microservice pipeline configuration as a subclass that inherits all the common configuration
+
+**Common Configuration in Parent Class:**
+- Which Regions go in each wave
+- How long bake time should be for each wave
+- Alarm thresholds and monitoring configuration
+- Deployment strategies (rolling, blue/green)
+
+**Microservice-Specific Configuration in Subclass:**
+- Service-specific deployment artifacts
+- Custom health checks
+- Service-specific alarms
+- Integration test configurations
+
+This approach dramatically reduces:
+- Configuration duplication
+- Inconsistencies between pipelines
+- Time spent updating pipeline configurations
+- Risk of misconfiguration
+
+<KeyTakeaways>
+- **Separate pipelines for each source type enable independent deployment**: Application code, infrastructure, configuration, and OS patches each have dedicated pipelines so issues in one don't block others from reaching production
+- **Code review is the last manual gate before production**: With fully automated pipelines, code review must evaluate not just correctness but deployment safety, monitoring adequacy, and rollback capability
+- **Pre-production environments mirror production characteristics**: Gamma uses production configuration, monitoring, alarms, and canary testing to validate both functionality and safe deployment before production
+- **One-box testing validates backward compatibility in mixed fleets**: Deploying new code to a single box alongside current code catches issues like data format incompatibilities before they affect entire environments
+- **Automated rollbacks enable truly hands-off deployments**: High-severity aggregate alarms automatically roll back all team deployments when any microservice shows impact, often before on-call engineers engage
+- **Bake time prevents slow-burning issues from spreading**: Early pipeline waves have longer bake time to build confidence cautiously, while later waves have shorter bake time to balance safety with global deployment speed
+- **Deployment blockers prevent compounding failures**: Alarm and time window blockers prevent new deployments during active issues or high-risk time periods, reducing the chance of making bad situations worse
+- **Pipelines as code enables consistency at scale**: Inheritance-based pipeline configuration reduces duplication and ensures teams benefit from centralized best practices and new Region additions automatically
+</KeyTakeaways>

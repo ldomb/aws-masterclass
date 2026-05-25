@@ -1,0 +1,60 @@
+{
+  "lessonSlug": "timeouts-retries-backoff",
+  "questions": [
+    {
+      "question": "Your service experiences occasional timeouts to a downstream service. Metrics show the downstream p99.9 latency is 150ms and p50 is 145ms. You're seeing 0.5% false timeouts with a 200ms timeout. What's the best approach?",
+      "options": [
+        "Increase timeout to 500ms to eliminate false timeouts completely",
+        "Add padding to account for tight latency bounds and network variance",
+        "Keep the current timeout but implement more aggressive retries",
+        "Switch to using SO_RCVTIMEO for better timeout control"
+      ],
+      "correctIndex": 1,
+      "explanation": "When p99.9 is close to p50 (tight latency bounds), small latency increases can cause high numbers of timeouts. Adding padding helps avoid this while maintaining reasonable timeout values. Increasing to 500ms defeats the purpose of timeouts, and SO_RCVTIMEO has known disadvantages for end-to-end timeouts."
+    },
+    {
+      "question": "You have a 5-layer service stack where each layer independently implements 3 retries. The bottom database starts failing under load. What load multiplier hits the database?",
+      "options": [
+        "15x (5 layers × 3 retries)",
+        "243x (3^5)",
+        "3x (retries are deduplicated)",
+        "125x (5^3)"
+      ],
+      "correctIndex": 1,
+      "explanation": "Retries at each layer multiply rather than add. With 3 retries per layer across 5 layers, you get 3^5 = 243x load amplification. This is why Amazon implements retries at a single point in the stack for low-cost operations."
+    },
+    {
+      "question": "Your asynchronous job processor uses exponential backoff with retries. During an outage, jobs backed off to the maximum 60-second cap. When the outage clears, all jobs retry simultaneously and cause another overload. What's the best solution?",
+      "options": [
+        "Increase the maximum backoff cap to 120 seconds",
+        "Add jitter to the backoff time to spread out retries",
+        "Remove the backoff cap entirely",
+        "Implement circuit breakers to stop all retries"
+      ],
+      "correctIndex": 1,
+      "explanation": "When all clients back off to the same capped time, they retry simultaneously, causing synchronized load spikes. Jitter adds randomness that spreads retries across time, preventing this synchronization. Increasing the cap just delays the problem, and circuit breakers introduce modal behavior that's difficult to test."
+    },
+    {
+      "question": "You're implementing periodic health checks that run every 60 seconds across 1000 servers. Operators report regular traffic spikes every minute. Which jitter strategy is best?",
+      "options": [
+        "Random jitter between 0-60 seconds, recalculated on each execution",
+        "Consistent jitter based on server ID, same offset every time",
+        "No jitter - the spikes are expected and should be accommodated",
+        "Synchronized execution at the same time for easier monitoring"
+      ],
+      "correctIndex": 1,
+      "explanation": "Consistent jitter (same offset per host) spreads out the load while ensuring that if there's an overload or race condition, it happens predictably in a pattern that humans can identify for troubleshooting. Random recalculated jitter would make debugging much harder. Synchronized execution defeats the purpose entirely."
+    },
+    {
+      "question": "Your service calls an external API to create resources. The API sometimes returns 500 errors due to transient issues, but retrying the same request can create duplicate resources. What's the safest retry strategy?",
+      "options": [
+        "Never retry any requests that might have side effects",
+        "Only retry on network errors, not on 500 status codes",
+        "Use a client-generated idempotency token with each request and retry freely",
+        "Retry with exponential backoff but query first to check if the resource exists"
+      ],
+      "correctIndex": 2,
+      "explanation": "APIs with side effects aren't safe to retry unless they provide idempotency guarantees. Using a client-generated idempotency token (like EC2's RunInstances ClientToken) allows safe retries because the server can detect duplicates and ensure the operation happens at most once, even with multiple retries."
+    }
+  ]
+}

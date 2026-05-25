@@ -1,0 +1,60 @@
+{
+  "lessonSlug": "static-stability-availability-zones",
+  "questions": [
+    {
+      "question": "Your application runs on 6 EC2 instances across 3 Availability Zones during normal operation. Following static stability principles for a single AZ failure, what is the minimum total number of instances you should deploy?",
+      "options": [
+        "6 instances (2 per zone) with auto-scaling to launch more on failure",
+        "8 instances (rounding up from 50% overprovision)",
+        "9 instances (3 per zone) so any 2 zones have the required 6",
+        "12 instances (4 per zone) for maximum safety"
+      ],
+      "correctIndex": 2,
+      "explanation": "With static stability, you pre-provision enough capacity so that losing an entire Availability Zone doesn't require launching new instances. For 3 zones, this means 50% overprovision. Deploy 3 instances per zone (9 total), so each zone runs at ~66% capacity. If one zone fails, the remaining 2 zones have 6 instances—exactly what you need. This avoids control plane dependencies during failures."
+    },
+    {
+      "question": "A microservices application has service A calling service B, which calls service C. All three are deployed across 3 Availability Zones with Application Load Balancers. During an AZ impairment, what's the approximate probability a request avoids the impaired zone?",
+      "options": [
+        "2/3 (67%) because one of three zones is impaired",
+        "(2/3)³ = 8/27 (30%) because the request must avoid the impaired zone at each service",
+        "1/3 (33%) because the request will likely hit the impaired zone somewhere",
+        "Nearly 100% because load balancers automatically route around failures"
+      ],
+      "correctIndex": 1,
+      "explanation": "With regional services calling regional services, a request must independently avoid the impaired zone at each hop. With 3 services and 1 impaired zone, the probability is (2/3) × (2/3) × (2/3) = 8/27 or about 30%. This is why AWS designs foundational infrastructure services as zonal rather than regional—to maintain constant 2/3 probability regardless of call chain depth."
+    },
+    {
+      "question": "Your team suggests using Auto Scaling to handle Availability Zone failures by automatically launching replacement instances. Why is this approach less reliable than pre-provisioning capacity?",
+      "options": [
+        "Auto Scaling has a minimum 10-minute delay before launching instances",
+        "The EC2 control plane (needed for launching) may be impaired, and bootstrapping takes time during which capacity is reduced",
+        "New instances launched during failures are placed on less reliable hardware",
+        "Auto Scaling is limited to launching 10 instances per hour during Regional events"
+      ],
+      "correctIndex": 1,
+      "explanation": "The EC2 control plane is more complex than the data plane and more likely to experience issues during failures. Additionally, launching and bootstrapping instances (installing agents, configuration, application code) takes time. During this period, your reduced capacity may be overwhelmed by load. Static stability through pre-provisioning avoids both control plane dependencies and the time gap."
+    },
+    {
+      "question": "You're architecting Amazon RDS for a critical database workload across Availability Zones. Which configuration follows the active-standby static stability pattern?",
+      "options": [
+        "Primary instance in one AZ with automated backups to S3; launch standby manually if needed",
+        "Primary instance in one AZ; script to promote a read replica in another AZ during failure",
+        "Multi-AZ deployment with pre-provisioned standby in a different AZ; RDS manages automatic failover",
+        "Primary in one AZ with connection pooling to absorb failures until replacement is available"
+      ],
+      "correctIndex": 2,
+      "explanation": "The statically stable approach pre-provisions a standby instance in a different Availability Zone. RDS Multi-AZ does exactly this—the standby is already running, synchronously replicating data, and ready to take over. RDS automatically manages failover by repointing DNS. This avoids control plane dependencies (launching new instances) and minimizes downtime. Options A and B depend on control plane operations during failure."
+    },
+    {
+      "question": "Why does AWS design NAT Gateway as a zonal resource rather than a regional service with a single endpoint?",
+      "options": [
+        "Zonal design is cheaper to implement and operate",
+        "NAT Gateway traffic volumes are too high for cross-AZ networking",
+        "As foundational infrastructure, NAT Gateway must isolate failures within zones to prevent spreading impairments",
+        "Customer demand for zonal resources drove this design decision"
+      ],
+      "correctIndex": 2,
+      "explanation": "NAT Gateway sits in the critical data path for VPC internet connectivity. As foundational infrastructure providing Availability Zone independence, it must keep impairments isolated within zones. If NAT Gateway were regional with cross-zone traffic, a failure in one zone could spread to other zones, undermining the independence that makes multi-AZ architectures reliable. The zonal design has additional complexity but ensures true zone isolation."
+    }
+  ]
+}

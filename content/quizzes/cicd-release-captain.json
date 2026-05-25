@@ -1,0 +1,60 @@
+{
+  "lessonSlug": "cicd-release-captain",
+  "questions": [
+    {
+      "question": "Your team practices trunk-based development. A developer has been working on a major feature locally for three weeks without merging to main. What guidance would you provide based on Amazon's approach?",
+      "options": [
+        "This is fine—trunk-based development means keeping changes local until complete",
+        "Create a long-lived feature branch to share work with the team before merging to main",
+        "Split the work into smaller, incremental changes that can each be reviewed and merged within days, using feature flags if needed to hide incomplete functionality",
+        "Wait until the feature is complete, then merge everything to main in one large commit"
+      ],
+      "correctIndex": 2,
+      "explanation": "Amazon's trunk-based development emphasizes small, incremental changes that developers work on for only a few days or even hours before submitting for review. Large changes should be split into smaller pieces that can be merged incrementally, using techniques like feature flags to hide incomplete functionality. This keeps changes flowing through the pipeline continuously and reduces integration risk."
+    },
+    {
+      "question": "Your pipeline deploys to 20 AWS Regions. Currently, it deploys to all 20 Regions simultaneously after pre-production testing. Following Amazon's deployment wave pattern, how should you restructure this?",
+      "options": [
+        "Keep deploying to all Regions simultaneously since parallel deployment is faster",
+        "Deploy to one Region at a time sequentially to minimize risk, even if it takes weeks",
+        "Structure waves of increasing size: deploy to 1-2 Regions first to build confidence, then progressively increase parallelization in later waves",
+        "Split into two groups of 10 Regions and deploy to each group sequentially"
+      ],
+      "correctIndex": 2,
+      "explanation": "Amazon uses deployment waves of increasing size to balance risk and speed. Early waves deploy to one or a few Regions to build confidence cautiously. As confidence grows, later waves deploy to more Regions in parallel. This achieves the goal of preventing multi-Region impact while still deploying globally within days rather than weeks. Deploying to all Regions at once (option A) risks widespread impact, while one-at-a-time (option B) is too slow."
+    },
+    {
+      "question": "Your pipeline has three releases in flight: Release A is deploying to Stage 5, Release B just finished Stage 3, and Release C is waiting to enter Stage 3 (already approved by Stage 2). Stage 3 is slow because it deploys to a very large environment. What will happen when Stage 3 completes its current deployment of Release B?",
+      "options": [
+        "Release C will be promoted into Stage 3 and begin deployment",
+        "Stage 3 will wait for Release A to finish Stage 5 before accepting Release C to maintain order",
+        "Releases B and C will be batched together and deployed simultaneously to Stage 3",
+        "The pipeline will error because multiple releases cannot be in flight simultaneously"
+      ],
+      "correctIndex": 0,
+      "explanation": "Amazon's pipelines allow stages to work independently. When Stage 3 finishes deploying Release B, it can immediately start deploying Release C without waiting for downstream stages to finish with Release B. If multiple releases are waiting, newer releases supersede older ones. This independence allows multiple releases to be in flight, minimizing wait time while maintaining deployment order."
+    },
+    {
+      "question": "During a production incident, your on-call engineer needs to roll back an environment. The last deployment was 2 hours ago, but there have been 3 successful deployments since then, and the issue appears to be from a change deployed 5 days ago (8 deployments back). What should the engineer consider when choosing which release to roll back to?",
+      "options": [
+        "Always roll back to the most recent previous deployment to minimize the scope of rolled-back changes",
+        "Always roll back to before the problematic change (8 deployments) to ensure the issue is resolved",
+        "Weigh the trade-offs: rolling back 8 deployments removes a week of features and fixes, while waiting for a forward fix may be faster than widespread rollback",
+        "Roll back to the deployment from 5 days ago in one environment, compare metrics, then decide"
+      ],
+      "correctIndex": 2,
+      "explanation": "For latent changes deployed days ago, Amazon's engineers weigh trade-offs between rolling back a week's worth of changes (potentially removing new features and bug fixes) versus waiting for the pipeline to roll forward a targeted fix. The pipeline UI shows deployment history and code changes in each release to inform this decision. There's no automatic right answer—it depends on the severity of the issue and the value of intermediate changes."
+    },
+    {
+      "question": "Your team currently deploys by copying code to /opt/app on existing EC2 instances. During a recent rollback, newer configuration files were left behind, causing the older code to fail. How should you improve rollback safety following Amazon's immutability principles?",
+      "options": [
+        "Add a cleanup script to remove all files before each deployment",
+        "Deploy each version to a new directory (e.g., /opt/app/v123) and update symbolic links to point to the current version, so rollbacks use the same process",
+        "Use completely immutable AMIs for every deployment, replacing instances entirely",
+        "Keep detailed documentation of which files to delete during rollbacks"
+      ],
+      "correctIndex": 1,
+      "explanation": "While fully immutable AMIs (option C) are ideal, Amazon recognizes teams sometimes deploy to existing instances. The recommended approach is deploying each version to a new directory and updating symbolic links, making rollbacks use the same process and reducing side effects. This provides significant immutability benefits without requiring full instance replacement. Cleanup scripts (option A) can miss files, and documentation (option D) is error-prone and doesn't prevent issues."
+    }
+  ]
+}

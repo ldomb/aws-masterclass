@@ -1,0 +1,60 @@
+{
+  "lessonSlug": "avoiding-fallback",
+  "questions": [
+    {
+      "question": "Your web service caches user profiles from a database. You implement fallback to query the database directly if the cache fails. During a cache outage, what's the most likely outcome?",
+      "options": [
+        "Graceful degradation with slightly higher latency",
+        "Database overwhelm causing complete service failure",
+        "Automatic recovery once the cache restarts",
+        "No noticeable impact on end users"
+      ],
+      "correctIndex": 1,
+      "explanation": "This mirrors Amazon's retail website outage. If the cache was needed to prevent database overload in normal operation, falling back to direct database queries during cache failure will overwhelm the database, turning a partial outage (no caching) into complete failure (database locked up). This is the classic fallback trap."
+    },
+    {
+      "question": "Your service has a fallback mechanism that has never triggered in 18 months of production. During a major outage, the fallback triggers and fails with a NullPointerException. What's the core problem?",
+      "options": [
+        "Insufficient error handling in the fallback code",
+        "Fallback logic is rarely exercised and contains latent bugs",
+        "The primary code path should have prevented the outage",
+        "The fallback should have been implemented in a different language"
+      ],
+      "correctIndex": 1,
+      "explanation": "Fallback logic that rarely triggers in production inevitably contains latent bugs. By the time it executes (18 months later), engineers have forgotten how it works, and the rarely-tested code path fails when needed most. This is a fundamental problem with fallback strategies in distributed systems."
+    },
+    {
+      "question": "To improve availability of user session data, you're choosing between: (A) Implementing fallback from Redis to direct database queries, or (B) Using DynamoDB with higher inherent availability. Which should you choose and why?",
+      "options": [
+        "Option A - Fallback provides multiple layers of protection",
+        "Option B - Improving primary code reliability is more effective than fallback",
+        "Option A - Database queries are more reliable than any cache",
+        "Option B - DynamoDB is an AWS service so it's always better"
+      ],
+      "correctIndex": 1,
+      "explanation": "Amazon's preference is to improve the reliability of the primary (non-fallback) code. Using a database with inherently higher availability like DynamoDB provides better overall availability than complex fallback mechanisms. Fallback merely reduces likelihood of failure; robust primary code prevents failures."
+    },
+    {
+      "question": "Your service requires a mechanism similar to fallback for regulatory compliance. How should you implement it following Amazon best practices?",
+      "options": [
+        "Implement traditional fallback that triggers only during primary system failures",
+        "Run both primary and 'fallback' paths continuously, treating both as valid (convert to failover)",
+        "Test the fallback quarterly to ensure it works when needed",
+        "Document the fallback thoroughly so it can be manually triggered"
+      ],
+      "correctIndex": 1,
+      "explanation": "If fallback-like behavior is essential, exercise it continuously in production alongside the primary path. Run both, and treat both as equally valid data sources (e.g., randomly choosing between responses). This converts unpredictable fallback into predictable failover, following the constant work pattern."
+    },
+    {
+      "question": "IAM credentials for EC2 instances are proactively pushed to instances and remain valid for hours. What fallback problem does this approach avoid?",
+      "options": [
+        "It prevents the need for retry logic in application code",
+        "It eliminates the need for failover during credential refresh",
+        "It removes the need for fallback when the push mechanism fails",
+        "It simplifies the IAM authentication protocol"
+      ],
+      "correctIndex": 2,
+      "explanation": "By proactively pushing credentials before they're needed and keeping them valid for hours, the system reduces moving parts during request handling. If the push mechanism has a disruption, requests keep working with existing credentials. This eliminates the need for a fallback strategy during credential requests."
+    }
+  ]
+}

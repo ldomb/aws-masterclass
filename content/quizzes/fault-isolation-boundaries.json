@@ -1,0 +1,60 @@
+{
+  "lessonSlug": "fault-isolation-boundaries",
+  "questions": [
+    {
+      "question": "Your team is designing a disaster recovery plan for a critical application. The plan includes launching new EC2 instances in a secondary Availability Zone if the primary zone fails. Why might this approach be less reliable than pre-provisioning capacity?",
+      "options": [
+        "Pre-provisioned instances are faster because they don't need to boot",
+        "The EC2 control plane might be impaired during the failure, preventing instance launches",
+        "Instances launched during a failure consume more resources",
+        "AWS charges premium pricing for instances launched during outages"
+      ],
+      "correctIndex": 1,
+      "explanation": "During a failure scenario, the EC2 control plane (which handles launching instances) may also be impaired or under high load. Pre-provisioning capacity makes your system statically stable—it can continue operating without depending on control plane operations during the failure. This is more reliable than depending on the ability to make changes when the system is already under stress."
+    },
+    {
+      "question": "A financial services company needs to ensure that IAM credentials from their commercial AWS account cannot access resources in their AWS GovCloud deployment. Which AWS construct provides this isolation?",
+      "options": [
+        "Regions provide complete isolation between commercial and GovCloud",
+        "Availability Zones prevent cross-environment access",
+        "Partitions provide hard boundaries; GovCloud is in the aws-us-gov partition separate from the aws partition",
+        "Service Control Policies (SCPs) must be configured to block access"
+      ],
+      "correctIndex": 2,
+      "explanation": "Partitions provide hard boundaries in AWS. Commercial Regions are in the 'aws' partition while GovCloud is in 'aws-us-gov'. IAM credentials from one partition cannot access resources in another partition—this is a fundamental isolation mechanism, not something that requires configuration."
+    },
+    {
+      "question": "Your application uses S3 for object storage and needs to update bucket lifecycle policies during a failover procedure. During a Region-wide issue affecting us-east-1, you notice that lifecycle policy updates are failing in us-west-2. What is the most likely explanation?",
+      "options": [
+        "S3 buckets can only have lifecycle policies updated in the Region where they were created",
+        "Certain S3 control plane operations, including lifecycle policy updates, have a dependency on us-east-1",
+        "S3 automatically blocks configuration changes during Regional failures for safety",
+        "Lifecycle policies must be synchronized across Regions before updates can succeed"
+      ],
+      "correctIndex": 1,
+      "explanation": "Many S3 bucket configuration operations, including PutBucketLifecycle, have an underlying dependency on us-east-1 in the aws partition. This is an example of global single-Region operations. The lesson is that you should pre-configure buckets with necessary settings rather than depending on the ability to change configurations during a failure."
+    },
+    {
+      "question": "You're architecting a multi-AZ web application. The application team wants to deploy updates to all three Availability Zones simultaneously to minimize deployment time. Based on AWS best practices for zonal services, what would you recommend?",
+      "options": [
+        "Deploy simultaneously to all zones since Availability Zones are independent",
+        "Deploy to one Availability Zone at a time with time separation, following AWS's own deployment practices",
+        "Deploy to two zones simultaneously, then the third zone after validation",
+        "Use blue-green deployment to avoid any risk regardless of zone deployment order"
+      ],
+      "correctIndex": 1,
+      "explanation": "AWS follows zonal deployment practices for services like EC2, where deployments to different Availability Zones in the same Region are separated in time. This prevents a deployment problem from affecting multiple zones simultaneously. If a deployment issue occurs, it affects one zone, can be detected and rolled back, while other zones continue functioning normally. This is a key pattern for leveraging Availability Zone independence."
+    },
+    {
+      "question": "A data plane operation can best be described as:",
+      "options": [
+        "Any operation that modifies the configuration of AWS resources",
+        "Operations that handle the primary business function of a service after resources are provisioned",
+        "Administrative operations performed by AWS operators rather than customers",
+        "Operations that require elevated permissions and go through approval workflows"
+      ],
+      "correctIndex": 1,
+      "explanation": "Data plane operations handle the primary function of a service—for example, reading/writing to S3 buckets, routing packets in VPCs, or processing queries in a database. These operations are simpler and designed for higher availability than control plane operations, which handle creating, modifying, and deleting resources. Understanding this distinction helps you avoid control plane dependencies in critical paths."
+    }
+  ]
+}

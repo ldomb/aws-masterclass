@@ -1,0 +1,596 @@
+## Introduction
+
+Building highly available systems is one of the most critical challenges in cloud computing. When customers depend on your services for their business operations, even brief outages can have significant consequences. But what exactly does "highly available" mean? How do you measure availability? And most importantly, what can you do to improve it?
+
+This lesson establishes a rigorous foundation for understanding availability in distributed systems based on AWS's comprehensive whitepaper "Availability and Beyond: Understanding and Improving the Resilience of Distributed Systems on AWS." We'll explore the mathematical relationships between failure frequency, detection time, and repair time. You'll learn why predicting availability for distributed systems is fundamentally different from hardware systems, and discover the twelve rules AWS follows to build resilient workloads.
+
+Whether you're operating a startup's first production service or managing enterprise-scale infrastructure, understanding these principles will help you make informed architectural decisions and achieve your reliability goals. This document presents both theoretical foundations and practical applications—the concepts matter more than the math itself, but the math provides proof that your designs achieve intended outcomes.
+
+> "Even the best designs built on good intentions might not consistently achieve the desired outcome. This means you need mechanisms that measure the effectiveness of the solution, and thus, some level of math is necessary in building and operating resilient, highly available distributed systems."
+
+## Understanding Availability: The Core Formula
+
+**Availability** is defined as the percentage of time that a workload is available for use. More precisely, it's a ratio of expected uptime (being available) to total time being measured (expected uptime plus expected downtime):
+
+```
+Availability (A) = Uptime / (Uptime + Downtime)
+```
+
+To better understand this formula, we need three key metrics that describe the lifecycle of failures and recoveries:
+
+**Mean Time Between Failure (MTBF)** – The average time between when a workload begins normal operation and its next failure. This represents your uptime period—how long the system runs successfully before something goes wrong.
+
+**Mean Time to Repair (MTTR)** – The period when the workload is unavailable while the failed subsystem is repaired or returned to service. This is your downtime—the complete duration from when failure occurs until full service is restored.
+
+**Mean Time to Detection (MTTD)** – The critical component of MTTR representing how long it takes between a failure occurring and when repair operations can begin. Detection time is often a substantial portion of total repair time, making it a key target for improvement.
+
+<Mermaid title="Relationship Between MTTD, MTTR, and MTBF" chart={`gantt
+    title MTTD, MTTR, and MTBF
+    dateFormat X
+    axisFormat %S
+
+    section State
+    Normal (MTBF)    :active, mtbf1, 0, 10
+    Detection (MTTD) :crit, mttd, 10, 12
+    Repair (MTTR)    :crit, mttr, 12, 15
+    Normal (MTBF)    :active, mtbf2, 15, 25
+`} />
+
+Using these metrics, we can express availability as the ratio of time the workload is operational (MTBF) to total time including failures (MTBF + MTTR):
+
+```
+A = MTBF / (MTBF + MTTR)
+```
+
+And the probability of failure (F) as:
+
+```
+F = MTTR / (MTBF + MTTR) = 1 - A
+```
+
+Reliability is the ability of a workload to do the right thing, when requested, within the specified response time. This is what availability measures. The formula reveals three paths to improvement: make failures less frequent (increase MTBF), detect them faster (decrease MTTD), or repair them faster (decrease MTTR).
+
+<Callout type="info">
+**Rule 1**: Less frequent failure (longer MTBF), shorter failure detection times (shorter MTTD), and shorter repair times (shorter MTTR) are the three factors used to improve availability in distributed systems.
+</Callout>
+
+**Try it yourself:** Experiment with the interactive simulation below to see how MTBF, MTTD, and MTTR affect availability in practice.
+
+<AvailabilityCalculator />
+
+## Distributed System Availability: The Software Challenge
+
+The availability formula using MTBF and MTTR has its roots in hardware systems, where manufacturers can consistently calculate when components will wear out through rigorous testing. Hardware typically follows the predictable "bathtub curve" of failure rate—high failure during infant mortality, stable operation in the middle, and increasing failure as components wear out.
+
+<Mermaid title="Hardware vs Software Failure Rate" chart={`graph LR
+    subgraph HW["Hardware Failure Rate"]
+        A[Infant Mortality] --> B[Useful Life]
+        B --> C[Wear-Out]
+    end
+    subgraph SW["Software Failure Rate"]
+        D[Release 1] --> E[Release 2]
+        E --> F[Release 3+]
+    end
+    style HW fill:#e1f5ff,color:#1a1a1a
+    style SW fill:#fff4e1,color:#1a1a1a
+`} />
+
+Software in distributed systems behaves completely differently. It follows a staggered curve where new defects are introduced with each release. Consider the difference in change rate: a standard magnetic hard drive might have an annualized failure rate (AFR) of 0.93% and last 3–5 years without materially changing. During that same period, Amazon deploys 450–750 million changes to its software systems—changes that happen at rates exponentially higher than hardware.
+
+Hardware is subject to planned obsolescence with built-in lifespans requiring replacement after certain periods. Software theoretically isn't subject to this constraint—it doesn't have a wear-out period and can be operated indefinitely. However, this theoretical advantage is undermined by the constant introduction of new defects through changes.
+
+This creates fundamental challenges: **The testing and prediction models used for hardware don't apply to software.** Hundreds of attempts to build prediction models for software reliability since the 1970s generally fall into two categories: prediction modeling and estimation modeling. Both types generate forward-looking MTBF and MTTR through predictive modeling, stochastic simulation, historical analysis, or rigorous testing—but these calculations are never guarantees.
+
+The reasons a distributed system failed in the past may never reoccur. The reasons it fails in the future are likely different and possibly unknowable at design time. Recovery mechanisms required might take significantly different amounts of time for different failure types. Additionally, MTBF and MTTR are averages with standard deviation—workloads may experience shorter or longer times than predictions.
+
+<Callout type="warning">
+MTBF and MTTR are averages with inherent variation. Your workload may experience shorter or longer times between failures than the average predicts. Don't treat availability calculations as guarantees of uptime or downtime—use them as guides for architectural decisions and improvement priorities.
+</Callout>
+
+Despite these challenges, software component availability remains critically important. Software fails for numerous reasons and impacts workload availability. For highly available distributed systems, equal focus should be given to calculating, measuring, and improving software component availability as to hardware and external software subsystems.
+
+> **Rule 2**: The availability of the software in your workload is an important factor of your workload's overall availability and should receive an equal focus as other components.
+
+That said, MTBF and MTTR still provide key insights into how to improve availability. Reducing failure frequency (higher MTBF) and decreasing recovery time (lower MTTR) both lead to higher empirical availability, even if the exact values are difficult to predict.
+
+## Bohrbugs vs. Heisenbugs: Understanding Software Failures
+
+Distributed systems experience two general classes of bugs that affect availability, affectionately named after famous physicists:
+
+**Bohrbugs** are repeatable functional software issues. Given the same input, they consistently produce the same incorrect output. Like the deterministic Bohr atom model, which is solid and easily detected, these bugs are predictable. Bohrbugs are rare by the time a workload reaches production because they're usually caught during development and testing phases.
+
+**Heisenbugs** are transient bugs that only occur under specific, uncommon conditions. These conditions typically relate to hardware (transient device faults, implementation specifics like register size), compiler optimizations and language implementation, limit conditions (temporarily out of storage), or race conditions (not using proper semaphores for multi-threaded operations). Heisenbugs make up the majority of production bugs.
+
+These bugs are particularly difficult to find because they're elusive and seem to change behavior or disappear when you try to observe or debug them—similar to quantum mechanics where observation affects the system. However, if you restart the program, the failed operation will likely succeed because the operating environment is slightly different, eliminating the conditions that introduced the Heisenbug.
+
+The key insight: **Most failures in production are transient.** When the operation is retried, it's unlikely to fail again. To be resilient, distributed systems must be fault tolerant to Heisenbugs. This is achieved through several techniques:
+
+**Retries with exponential backoff and jitter** – Allow overcoming transient failures caused by Heisenbugs, overload, or other temporary conditions. Adding randomness (jitter) to retry delays prevents synchronized retry storms.
+
+**Idempotent operations** – When transactions can be retried multiple times without side effects, failures become less consequential. Designing for idempotency from the start simplifies recovery logic.
+
+**Circuit breakers** – Prevent cascading failures by stopping requests to failing dependencies, allowing time for recovery without compounding problems.
+
+**Process isolation with process-pairs** – Isolate processes that share no state with others. When a process fails, the software uses "process-pairs" to retry work, meaning a new process assumes the work of the failed one.
+
+**ACID transactions** – Treat each operation as an atomic transaction (Atomicity, Consistency, Isolation, Durability). This allows failed processes to roll back changes and restart gracefully from a known-good state without corrupting overall workload state.
+
+## Availability with Dependencies: The Multiplication Challenge
+
+Your workload depends on many components—hardware, software, and potentially other distributed systems. We call these **dependencies**—the things your workload depends on to provide functionality. They're classified as:
+
+**Hard dependencies** – Your workload cannot function without them, directly impacting availability. Examples include databases for stateful services, authentication systems, or core AWS services your application uses.
+
+**Soft dependencies** – Their unavailability can go unnoticed or tolerated for some period without immediate impact on core functionality. Examples might include analytics services, non-critical logging, or secondary data sources.
+
+You might try to calculate the theoretical maximum availability of a workload. This is the product of all dependencies' availabilities (including the software itself), because each must be operational:
+
+```
+Maximum A = α₁ × α₂ × α₃ × ... × αₙ
+```
+
+Where αₙ is the availability of a single subsystem or dependency.
+
+These availability numbers typically come from Service Level Agreements (SLAs) or Service Level Objectives (SLOs). SLAs define expected service levels customers will receive, metrics by which service is measured, and remediations or penalties (usually monetary) if service levels aren't achieved. SLOs are internal targets services aim to meet.
+
+Mathematically, a workload can be no more available than its least available dependency. However, in practice, workloads often exceed this theoretical maximum because:
+
+1. **Availability numbers are estimates** – They predict how often failure occurs and how quickly it can be repaired, not guarantees of downtime
+2. **Dependencies frequently exceed their SLAs** – Services often perform better than their published commitments
+3. **Higher internal targets** – Dependencies may have higher internal availability objectives than public SLAs provide
+4. **Unknown dependencies** – Some dependencies like worldwide internet routing don't offer SLAs, making calculations incomplete
+
+<Callout type="tip">
+**Rule 3**: Reducing dependencies can have a positive impact on availability. The fewer numbers less than one multiplied together, the larger the result.
+
+**Rule 4**: In general, select dependencies whose availability goals are equal to or greater than the goals of your workload.
+</Callout>
+
+What this tells us: Computing maximum theoretical availability produces rough order of magnitude calculations but likely isn't accurate or meaningfully insightful by itself. What the math does tell us is that fewer dependencies reduce overall likelihood of failure.
+
+The math also helps inform dependency selection processes. Selection affects how you design workloads, how you leverage redundancy in dependencies to improve their availability, and whether you take dependencies as soft or hard. Dependencies that can impact your workload should be carefully chosen.
+
+## The Power of Redundancy and Sparing
+
+When a workload utilizes multiple independent, redundant subsystems (spares), it achieves higher theoretical availability than using a single subsystem. For the entire system to be down, all spares must fail simultaneously.
+
+Consider two identical subsystems where the workload can operate if either is functional. If one subsystem's probability of failure is (1 - α), then the probability of both redundant subsystems being down at the same time is the product of each subsystem's failure probability:
+
+```
+F = (1 - α₁) × (1 - α₂)
+```
+
+For a workload with two redundant subsystems each having 99% availability:
+
+```
+A = 1 - (1 - 0.99) × (1 - 0.99)
+  = 1 - 0.01 × 0.01
+  = 1 - 0.0001
+  = 99.99%
+```
+
+This can be generalized for workloads with s spares (spare subsystems beyond the minimum needed). The workload only fails if s + 1 subsystems fail. For n total subsystems with s spares, f is the number of failure modes—the ways that s + 1 subsystems can fail out of n.
+
+This calculation uses the binomial theorem, the combinatorial math of choosing k elements from a set of n (or "n choose k"), where k is s + 1:
+
+```
+f = n! / (k! × (n-k)!)
+```
+
+This produces a generalized availability approximation incorporating failure modes and sparing:
+
+```
+A ≈ 1 - f × (1 - α)^(s+1)
+```
+
+<Mermaid title="Sparing with Three AZ-Distributed Servers (combined availability ≈ 99.9999%)" chart={`graph LR
+    A[Client] --> LB[Load Balancer]
+    LB --> S1[Server 1<br/>AZ-1]
+    LB --> S2[Server 2<br/>AZ-2]
+    LB --> S3[Server 3<br/>AZ-3]
+
+    style S1 fill:#90EE90,color:#1a1a1a
+    style S2 fill:#90EE90,color:#1a1a1a
+    style S3 fill:#90EE90,color:#1a1a1a
+`} />
+
+Sparing can be applied to any dependency providing resources that fail independently—EC2 instances in different Availability Zones, S3 buckets in different Regions, or database replicas across zones. Using spares helps dependencies achieve higher total availability supporting workload availability goals.
+
+> **Rule 5**: Use sparing to increase the availability of dependencies in a workload.
+
+## The Law of Diminishing Returns with Spares
+
+Sparing comes at a cost. Each additional spare costs the same as the original module, driving cost at least linearly. Building workloads that can use spares increases complexity—they must identify dependency failures, weight work away from failed resources to healthy ones, and manage overall capacity.
+
+**Redundancy is an optimization problem.** Too few spares means the workload fails more frequently than desired. Too many spares means the workload costs too much to run. There's a threshold where adding more spares costs more than the additional availability gain warrants.
+
+Consider a subsystem with 99.5% availability. Using the general availability formula with two spares (three total subsystems):
+
+```
+A ≈ 1 - (1) × (1 - 0.995)³ = 99.9999875%
+```
+
+This represents approximately 3.94 seconds of downtime per year.
+
+With 10 spares (11 total subsystems):
+
+```
+A ≈ 1 - (1) × (1 - 0.995)¹¹ ≈ 25.5 nines
+```
+
+The approximate downtime would be 1.26252 × 10⁻¹⁵ milliseconds per year—effectively zero.
+
+We incurred a 5× increase in sparing cost (from 3 to 11 subsystems) to achieve four seconds less downtime annually. For most workloads, this cost increase is unwarranted for such minimal availability improvement.
+
+After three spares, results become fractions of a second of expected downtime yearly. Beyond this point, you reach the area of **diminishing returns**. There might be an urge to "just add more" for higher availability, but the cost benefit disappears very quickly. Using more than three spares doesn't provide material, noticeable gain for almost all workloads when the subsystem itself has at least 99% availability.
+
+<Callout type="info">
+**Rule 6**: There is an upper bound to the cost efficiency of sparing. Utilize the fewest spares necessary to achieve the required availability.
+</Callout>
+
+Consider the **unit of failure** when selecting spare count. For example, examine a workload requiring 10 EC2 instances to handle peak capacity deployed in a single AZ. Because AZs are designed as fault isolation boundaries, the unit of failure isn't a single EC2 instance—an entire AZ worth of instances can fail together.
+
+In this case, add redundancy with another AZ by deploying 10 additional instances to handle the load during AZ failure, totaling 20 instances (following static stability patterns). While this appears to be 10 spare instances, it's really just a single spare AZ, so you haven't exceeded diminishing returns.
+
+However, you can be even more cost efficient while increasing availability: utilize three AZs and deploy five instances per AZ. This provides one spare AZ with only 15 total instances (versus two AZs with 20 instances), still providing the required 10 instances to serve peak capacity during a single AZ impairment event.
+
+Build in sparing to be fault tolerant across all fault isolation boundaries used by the workload: instance, cell, Availability Zone, and Region.
+
+## CAP Theorem and Consistency Tradeoffs
+
+Another way to think about availability relates to the CAP theorem. The theorem states that a distributed system (one made of multiple nodes storing data) cannot simultaneously provide more than two of three guarantees:
+
+**Consistency** – Every read request receives the most recent write or an error when consistency can't be guaranteed.
+
+**Availability** – Every request receives a non-error response, even when nodes are down or unavailable.
+
+**Partition tolerance** – The system continues operating despite the loss of arbitrary numbers of messages between nodes.
+
+Most distributed systems must tolerate network failures, meaning network partitioning must be allowed. This forces workloads to choose between consistency and availability when network partitions occur.
+
+If the workload chooses **availability**, it always returns responses but with potentially inconsistent data. If it chooses **consistency**, it returns errors during network partitions since the workload can't ensure data consistency.
+
+For workloads with high availability goals, they might choose Availability and Partition tolerance (AP) to prevent returning errors (being unavailable) during network partitions. This requires adopting relaxed consistency models like **eventual consistency** or **monotonic consistency**.
+
+<Callout type="tip">
+Within AWS Regions, many services offer strongly consistent data persistence. Amazon RDS multi-AZ deployments use synchronous replication. Amazon S3 offers strong read-after-write consistency. Amazon EBS offers multi-volume crash consistent snapshots. Amazon DynamoDB can perform strongly consistent reads. These features help achieve lower Recovery Point Objectives (RPO)—in most cases zero RPO—in single Regions than in multi-Region architectures.
+</Callout>
+
+## Static Stability and Fault Isolation
+
+Two important architectural concepts enable high availability:
+
+**Fault tolerance** is the ability to withstand subsystem failure and maintain availability (doing the right thing within established SLAs). To implement fault tolerance, workloads use spare or redundant subsystems. When one subsystem in a redundant set fails, another picks up its work, typically almost seamlessly. With true spares, multiple subsystem failures are required to produce adverse impact on the workload.
+
+**Fault isolation** minimizes scope of impact when failure occurs. This is typically implemented with modularization—workloads are broken into small subsystems that fail independently and can be repaired in isolation. Failure of a module doesn't propagate beyond the module. This concept spans both:
+
+- **Vertically** – Across different functionality in a workload
+- **Horizontally** – Across multiple subsystems providing the same functionality
+
+These modules act as **fault containers** limiting scope of impact during events.
+
+The architectural patterns of **control planes**, **data planes**, and **static stability** directly support implementing fault tolerance and isolation:
+
+**Control plane** – The part of the workload involved in making changes: adding resources, deleting resources, modifying resources, and propagating changes where needed. Control planes are typically more complex with more moving parts than data planes, making them statistically more likely to fail and have lower availabilities.
+
+**Data plane** – The part providing day-to-day business functionality. Data planes tend to be simpler and operate at higher volumes than control planes, leading to higher availabilities.
+
+**Static stability** – The ability of a workload to continue correct operation despite dependency impairments. One implementation method removes control plane dependencies from data planes. Another method loosely couples workload dependencies. Perhaps the workload doesn't see updated information (new things, deleted things, modified things) that dependencies were supposed to deliver, but everything working before the impairment continues functioning.
+
+When thinking about workload impairment, there are two high-level recovery approaches:
+
+1. **React after impairment** – Respond using AWS Auto Scaling to add new capacity
+2. **Prepare before impairment** – Overprovision infrastructure so the workload continues operating correctly without needing additional resources
+
+A statically stable system uses the latter approach, pre-provisioning spare capacity to be available during failure. This avoids creating dependencies on control planes in the workload's recovery path to provision new capacity. Additionally, provisioning new capacity for various resources takes time. While waiting for new capacity, your workload can become overloaded by existing demand and experience further degradation, leading to "brown-out" or complete availability loss.
+
+> **Rule 7**: Don't take dependencies on control planes in your data plane, especially during recovery.
+
+> **Rule 8**: Loosely couple dependencies so your workload can operate correctly despite dependency impairment, where possible.
+
+## Measuring Availability in Practice
+
+As we saw earlier, creating forward-looking availability models for distributed systems is difficult and may not provide desired insights. What provides more utility is developing consistent ways to measure your workload's actual availability.
+
+The definition of availability as uptime and downtime represents failure as binary—either the workload is up or not. However, this is rarely the case. **Failure has degrees of impact** and is often experienced in subsets of the workload, affecting percentages of users, requests, locations, or latency percentiles. These are all **partial failure modes**.
+
+While MTTR and MTBF are useful in understanding what drives resulting availability and how to improve it, their utility isn't as empirical measures of availability. Additionally, workloads are composed of many components. A payment processing system consists of many APIs and subsystems. Asking "what is the availability of the entire workload?" becomes complex and nuanced.
+
+### Server-Side and Client-Side Request Success Rate
+
+These two methods are very similar, differing only in the point of view from which measurement is taken.
+
+**Server-side metrics** can be collected from instrumentation in the service. However, they're incomplete—if clients can't reach the service, you can't collect those metrics.
+
+**Client-side metrics** provide insight into client experience. Instead of relying on telemetry from clients about failed requests, an easier collection method uses **canaries**—software that regularly probes services and records metrics.
+
+Both methods calculate availability as the fraction of total valid units of work the service receives and processes successfully (ignoring invalid work like 404 errors):
+
+```
+A = Successful Requests / Total Valid Requests
+```
+
+For request-based services, the unit of work is the request (like HTTP requests). For event-based or task-based services, units of work are events or tasks (like processing messages from a queue).
+
+This measure of availability is meaningful in short time intervals like one-minute or five-minute windows. It's best suited at granular perspectives, like per-API level for request-based services.
+
+<Mermaid title="Availability Thresholds Across Time Windows" chart={`graph LR
+    T1[t+0–5 min<br/>94.5%] --> Th
+    T2[t+5–10 min<br/>99.0%] --> Th
+    T3[t+10–15 min<br/>99.8%] --> Th
+    Th[Goal 99.5%<br/>SLA 99%<br/>Alarm 95%]
+
+    style T1 fill:#ffcccb,color:#1a1a1a
+    style T2 fill:#90EE90,color:#1a1a1a
+    style T3 fill:#90EE90,color:#1a1a1a
+    style Th fill:#e1f5ff,color:#1a1a1a
+`} />
+
+Without context of different thresholds (availability goal, SLA, alarm threshold), a graph might not provide significant insight into how your service is operating.
+
+You can track and describe larger subsystem availability (like a control plane or entire service) by taking the average of each five-minute data point for each subsystem. This gives equal weight to all subsystems making up your service.
+
+Alternatively, sum all requests received and successfully processed from all APIs in the service to calculate availability in five-minute intervals. However, this latter method might hide individual APIs with low throughput and bad availability.
+
+| Measurement Period | API 1 | API 2 | Total (Summed) | Average |
+|-------------------|-------|-------|----------------|---------|
+| Requests | 1,000,000 | 100 | 1,000,100 | - |
+| Successful | 999,000 | 50 | 999,050 | - |
+| Availability | 99.9% | 50% | 99.895% | 74.95% |
+
+Neither approach is wrong, but it shows the importance of understanding what availability metrics tell you. You might favor summing requests if your workload receives similar request volume across subsystems. This focuses on the "request" and its success as the measure of availability and customer experience. Alternatively, average subsystem availabilities to equally represent their criticality despite request volume differences. This focuses on each subsystem's ability as a proxy for customer experience.
+
+### Annual Downtime
+
+This form of availability metric is more appropriate for longer-term goal setting and review. It requires defining what downtime means for your workload. You can then measure availability based on minutes the workload was not in "outage" condition relative to total minutes in the given period.
+
+Some workloads might define downtime as drops below 95% availability of a single API or workload function for one-minute or five-minute intervals. You might only consider downtime as it applies to subsets of critical data plane operations. For example, the Amazon Messaging (SQS, SNS) Service Level Agreement for SQS availability applies to the SQS Send, Receive, and Delete APIs.
+
+Larger, more complex workloads might need system-wide availability metrics. For a large e-commerce site, a system-wide metric can be something like customer order rate. Here, drops of 10% or more in orders compared to forecasted quantity during any five-minute window can define downtime.
+
+In either approach, sum all periods of outage to calculate annual availability. For example, if during a calendar year there were 27 five-minute periods of downtime (defined as availability of any data plane API dropping below 95%), the overall downtime was 135 minutes (some periods might be consecutive, others isolated), representing 99.97% annual availability.
+
+This measurement method provides data and insight missing from client-side and server-side metrics. Consider a workload that's impaired with significantly elevated error rates. Customers might stop making calls altogether—activating circuit breakers or following disaster recovery plans to use the service in different regions. If only measuring failed responses, the workload's availability could actually increase during impairment, not because the impairment improves but because customers stop using it.
+
+### Latency as Availability
+
+Finally, it's important to measure latency of processing units of work within your workload. Part of the availability definition is doing work within established SLAs. If returning a response takes longer than client timeout, the client perceives the request failed and the workload is unavailable. However, on the server-side, the request might have appeared to process successfully.
+
+Measuring latency provides another lens with which to evaluate availability. Use percentiles and trimmed mean as good statistics for this measurement. They're commonly measured at:
+
+- **50th percentile (P50 and TM50)** – Median experience
+- **99th percentile (P99 and TM99)** – Worst-case experience for most users
+- **99.9th percentile (P99.9 and TM99.9)** – Extreme outliers
+
+Measure latency with canaries to represent client experience as well as with server-side metrics. Whenever average of some percentile latency (like P99 or TM99.9) goes above target SLA, consider that downtime contributing to your annual downtime calculation.
+
+## Designing Highly Available Distributed Systems on AWS
+
+The previous sections covered mostly theoretical availability of workloads and what they can achieve. These concepts inform dependency selection processes and how you implement redundancy. We've looked at relationships of MTTD, MTTR, and MTBF to availability. This section introduces practical guidance based on previous theory.
+
+In short, engineering workloads for high availability aims to increase MTBF and decrease both MTTR and MTTD.
+
+While eliminating all failures would be ideal, it's not realistic. In large distributed systems with deeply stacked dependencies, failures will occur. "Everything fails all of the time," and "you can't legislate against failure—focus on fast detection and response."
+
+This means you frequently don't have control over whether failure happens. What you can control is how quickly you detect failure and do something about it. While increasing MTBF is still important for high availability, the most significant changes customers have within their control are reducing MTTD and MTTR.
+
+### Reducing MTTD: Improving Detection
+
+Reducing MTTD of failures means discovering failures as quickly as possible. Shortening MTTD is based on **observability**—how you've instrumented your workload to understand its state.
+
+Monitor **Customer Experience metrics** in workload critical subsystems to proactively identify when problems occur:
+- Error rate
+- Availability
+- Latency
+- Volume
+- Throttle rate
+
+Use Amazon CloudWatch Synthetics to create canaries monitoring APIs and consoles to proactively measure user experience. Other health check mechanisms minimize MTTD:
+- Elastic Load Balancing (ELB) health checks
+- Amazon Route 53 health checks
+- Application-specific health endpoints
+
+Your monitoring must detect **partial failures** of both the system as a whole and individual subsystems. Availability, failure, and latency metrics should use dimensionality of your fault isolation boundaries as CloudWatch metric dimensions.
+
+For example, consider a single EC2 instance that's part of a cell-based architecture in the use1-az1 AZ in the us-east-1 Region, part of the workload's update API in its control plane subsystem. When the server pushes metrics, it can use these dimensions:
+- Instance ID
+- AZ
+- Region
+- API name
+- Subsystem name
+
+This allows observability and alarms across each dimension to detect failure.
+
+> **Rule 9**: Observability and instrumentation are critical for reducing MTTD and MTTR.
+
+### Reducing MTTR: Faster Recovery
+
+After failure is discovered, the remainder of MTTR is actual repair or mitigation of impact. To repair or mitigate failure, you must know what's wrong. Two key metric groups provide insight:
+
+**Impact Assessment metrics** – Measure scope of impact during failure: number or percentage of customers, resources, or workloads impacted.
+
+**Operational Health metrics** – Help identify why there's impact. After discovering the "why," operators and automation can respond to and resolve failure. Common operational health metrics:
+- Utilization
+- Capacity
+- Throughput
+- Error rate
+- Availability
+- Latency
+
+#### Route Around Failure
+
+The fastest approach to mitigating impact is through **fail-fast subsystems that route around failure**. This uses redundancy to reduce MTTR by quickly shifting work of failed subsystems to spares. Redundancy can range from software processes to EC2 instances to multiple AZs to multiple Regions.
+
+Spare subsystems can reduce MTTR down to almost zero. Recovery time is only what it takes to reroute work to stand-by spares. This often happens with minimal latency, allowing work to complete within defined SLA and maintaining system availability. This produces MTTRs experienced as slight (perhaps even imperceptible) delays rather than prolonged unavailability.
+
+For example, if your service uses EC2 instances behind an Application Load Balancer (ALB), you can configure health checks at intervals as small as five seconds requiring only two failed checks before marking targets unhealthy. Within 10 seconds, you can detect failure and stop sending traffic to unhealthy hosts. Here, MTTR is effectively the same as MTTD since failure detection immediately mitigates the issue.
+
+This is what high-availability or continuous-availability workloads try to achieve—quickly route around failure by detecting failed subsystems, marking them as failed, stopping traffic to them, and sending traffic to redundant subsystems instead.
+
+Note that using fail-fast mechanisms makes workloads very sensitive to transient errors. Ensure load balancer health checks perform shallow or liveness checks of just the instance, not testing dependencies or workflows (deep health checks). This helps prevent unnecessary replacement of instances during transient errors affecting the workload.
+
+Observability and ability to detect failure in subsystems is critical for routing around failure to succeed. You must know scope of impact so affected resources can be marked as unhealthy or failed and taken out of service. For example, if a single AZ experiences partial service impairment, your instrumentation must identify the AZ-localized issue to route around all resources in that AZ until recovery.
+
+Being able to route around failure might require additional tooling. Imagine instances in one AZ passing local health checks, but an isolated AZ impairment causes them to fail connecting to their database in a different AZ. Load balancing health checks won't take those instances out of service. A different automated mechanism would be needed to remove the AZ from the load balancer or force instances to fail health checks, which depends on identifying that scope of impact is an AZ.
+
+In some cases, shift of work to redundant subsystems can't be automated, like failover of primary to secondary database where technology doesn't provide its own leader election. This is common for AWS multi-Region architectures. Because these failovers require downtime, can't be immediately reversed, and leave workloads without redundancy for periods, it's important to have humans in decision-making.
+
+Workloads that can embrace less strict consistency models can achieve shorter MTTRs by using multi-Region failover automation to route around failure. Features like Amazon S3 cross-Region replication or Amazon DynamoDB global tables provide multi-Region capabilities through eventually consistent replication.
+
+Routing around failure can be implemented with two strategies:
+
+1. **Static stability** – Pre-provision enough resources to handle complete load of failed subsystem. Attempting to provision new resources during failure increases MTTR and adds control plane dependency in recovery path. However, it comes at additional cost.
+
+2. **Load shedding with scale-up** – Route some traffic from failed subsystem to others and load shed excess traffic that can't be handled by remaining capacity. During this degradation period, scale up new resources to replace failed capacity. This approach has longer MTTR and creates control plane dependency but costs less in standby spare capacity.
+
+#### Return to a Known Good State
+
+Another common mitigation approach during repair is returning the workload to previous known good state.
+
+If a recent change might have caused failure, rolling back that change is one return method. During deployment, minimizing MTTD and MTTR relies on observability and automation. Your deployment process must continually watch the workload for introduction of increased error rates, elevated latency, or anomalies. After recognition, it should halt deployment.
+
+Various deployment strategies exist: in-place deployments, blue/green deployments, rolling deployments. Each uses different mechanisms to return to known-good state—automatically rolling back to previous state, shifting traffic back to blue environment, or requiring manual intervention.
+
+CloudFormation offers automatic rollback capability as part of create and update stack operations, as does AWS CodeDeploy. CodeDeploy also supports blue/green and rolling deployments. For Amazon ECS services, blue/green and rolling deployments are now built-in features (since July 2025), eliminating the need for a separate CodeDeploy integration. To leverage these capabilities and minimize MTTR, consider automating all infrastructure and code deployments through these services. In scenarios where you can't use these services, consider implementing the saga pattern with AWS Step Functions to rollback failed deployments.
+
+When considering restart, there are several approaches ranging from rebooting a server (longest) to restarting a thread (shortest):
+
+| Fault Recovery Mechanism | Estimated MTTR |
+|-------------------------|----------------|
+| Launch and configure new virtual server | 15 minutes |
+| Redeploy the software | 10 minutes |
+| Reboot server | 5 minutes |
+| Restart or launch container | 2 seconds |
+| Invoke new serverless function | 100 ms |
+| Restart process | 10 ms |
+| Restart thread | 10 μs |
+
+Reviewing this table, there are clear MTTR benefits using containers and serverless functions (like AWS Lambda)—their MTTR is orders of magnitude faster than restarting or launching virtual machines. However, using fault isolation through software modularity is also beneficial. If you can contain failure to single process or thread, recovering from failure is much faster than restarting container or server.
+
+As a general approach to recovery, move from bottom to top: 1) Restart, 2) Reboot, 3) Re-image/Redeploy, 4) Replace. However, once you get to reboot, routing around failure is usually faster (taking at most 3–4 minutes). So to most quickly mitigate impact after attempted restart, route around failure, then in the background continue recovery process to return capacity to your workload.
+
+> **Rule 10**: Focus on impact mitigation, not problem resolution. Take the fastest path back to normal operation.
+
+### Increasing MTBF: Preventing Failures
+
+The final component to improving availability is increasing MTBF, applicable to both software and AWS services used to run it.
+
+#### Increasing Distributed System MTBF
+
+One way to increase MTBF is reducing defects in software through several methods:
+
+**Code quality tools** – Use Amazon CodeGuru Reviewer to find and remediate common errors before deployment.
+
+**Comprehensive testing** – Perform peer code reviews, unit tests, integration tests, regression tests, and load tests before deploying to production. Increasing code coverage in tests helps ensure even uncommon execution paths are tested.
+
+**Smaller changes** – Deploy smaller changes to reduce complexity of change, helping prevent unexpected outcomes by reducing the number of variables changed at once. Each activity provides opportunity to identify and fix defects before they can be invoked.
+
+**Regular testing** – Implement chaos engineering programs to test how workloads fail, validate recovery procedures, and find and fix failure modes before they occur in production. Use AWS Fault Injection Simulator as part of chaos engineering experiment toolset.
+
+**Fault tolerance** – Implement techniques to make workloads fault tolerant to Heisenbugs:
+- Fail-fast modules
+- Retries with exponential backoff and jitter
+- Transactions (ACID properties)
+- Idempotency
+
+When considering Heisenbug effects on fault-tolerant hardware configurations, the probability of Heisenbugs appearing on both primary and redundant subsystem is infinitesimally small. In distributed systems, we want to achieve the same outcomes with software.
+
+When Heisenbugs are invoked, software must quickly detect incorrect operation and fail so it can be tried again. This is achieved through defensive programming and validating inputs, intermediate results, and output. Additionally, processes are isolated and share no state with other processes. This modular approach ensures scope of impact during failure is limited—processes fail independently.
+
+However, you should not aim to make software fault-tolerant to Bohrbugs. These defects must be found and removed before workloads enter production since no level of redundancy achieves correct outcomes.
+
+**Fault isolation** – The final way to increase MTBF is reducing scope of impact from failure. Using fault isolation through modularization to create fault containers is a primary method as outlined earlier. Reducing failure rate improves availability.
+
+AWS uses techniques like:
+- Dividing services into control planes and data planes
+- Availability Zone Independence (AZI)
+- Regional isolation
+- Cell-based architectures
+- Shuffle-sharding
+
+These are also patterns that can be used by AWS customers.
+
+For example, review a scenario where a workload placed customers into different fault containers of its infrastructure servicing at most 5% of total customers. One fault container experiences an event increasing latency beyond client timeout for 10% of requests. During this event:
+- For 95% of customers, the service was 100% available
+- For 5% of customers, the service appeared 90% available
+- Overall availability: 1 - (5% × 10%) = 99.5%
+
+This is better than 10% of requests failing for 100% of customers (resulting in 90% availability).
+
+> **Rule 11**: Fault isolation decreases scope of impact and increases the MTBF of the workload by reducing the overall failure rate.
+
+#### Increasing Dependency MTBF
+
+The first method to increase AWS dependency MTBF is through using fault isolation. Many AWS services offer AZ-level isolation—failure in one AZ doesn't affect the service in different AZs.
+
+Using redundant EC2 instances in multiple AZs increases subsystem availability. AZ independence (AZI) provides sparing capability inside a single Region, allowing you to increase availability for AZI services.
+
+However, not all AWS services operate at AZ level. Many offer regional isolation. Where the designed-for availability of regional service doesn't support overall availability required for your workload, consider multi-Region approaches. Each Region offers isolated instantiation of the service, equivalent to sparing.
+
+Various services help make building multi-Region services easier:
+- Amazon Aurora Global Database
+- Amazon DynamoDB global tables
+- Amazon ElastiCache (Valkey/Redis OSS) – Global Datastore
+- AWS Global Accelerator
+- Amazon S3 Cross-Region Replication
+- Amazon Route 53 Application Recovery Controller
+
+This document doesn't delve into multi-Region workload strategies, but you should weigh availability benefits of multi-Region architectures with additional cost, complexity, and operational practices they require to meet desired availability goals.
+
+The next method to increase dependency MTBF is designing workloads to be statically stable. For example, consider a workload serving product information. When customers request a product, your service makes requests to external metadata services to retrieve product details, then returns all that information to users.
+
+However, if metadata service is unavailable, customer requests fail. Instead, you can asynchronously pull or push metadata locally to your service to answer requests. This eliminates synchronous calls to metadata service from your critical path.
+
+Because your service remains available even when metadata service is not, you can remove it as a dependency in your availability calculation. This example depends on the assumption that metadata doesn't change frequently and serving stale metadata is better than request failure. Another similar example is serve-stale for DNS, allowing data to be kept in cache beyond TTL expiry and used for responses when refreshed answer isn't readily available.
+
+The final method to increase dependency MTBF is reducing scope of impact from failure. As discussed earlier, failure is not binary—there are degrees of failure. This is the effect of modularization—failure is contained to just requests or users being serviced by that container. This results in fewer failures during events, ultimately increasing overall workload availability by limiting scope of impact.
+
+### Reducing Common Sources of Impact
+
+In 1985, Jim Gray discovered during a Tandem Computers study that failure was primarily driven by two things: software and operations. Even 36 years later, this continues to be true. Despite technology advances, there isn't an easy solution to these problems, and major sources of failure haven't changed.
+
+#### Stability vs. Features
+
+If we refer back to failure rates for software and hardware, we notice defects are added in each software release. This means any change to the workload introduces increased risk of failure. These changes are typically new features, providing a corollary: Higher availability workloads favor stability over new features. Thus, one of the simplest ways to improve availability is deploy less often or deliver fewer features.
+
+Workloads deploying more frequently inherently have lower availability than those that do not. However, workloads failing to add features don't keep up with customer demand and can become less useful over time.
+
+So how do we continue innovating and releasing features safely? The answer is **standardization**. What's the correct way to deploy? How do you order deployments? What are standards for testing? How long do you wait between stages? Do unit tests cover enough of software code?
+
+These are questions that standardization answers, preventing issues caused by things like not load testing, skipping deployment stages, or deploying too quickly to too many hosts.
+
+The way you implement standardization is through **automation**. It reduces chance of human mistakes and lets computers do what they're good at—doing the same thing over and over the same way every time.
+
+The way you stick standardization and automation together is to set **goals**. Goals like no manual changes, host access only through contingent authorization systems, writing load tests for every API, and so on. Operational excellence is a cultural norm that can require substantial change. Establishing and tracking performance against goals helps drive cultural change with broad impact on workload availability.
+
+#### Operator Safety
+
+The other major contributor to operational events introducing failure are people. Humans make mistakes—using wrong credentials, entering wrong commands, pressing Enter too soon, or missing critical steps. Taking manual action consistently results in error, resulting in failure.
+
+One of the major causes for operator errors are confusing, unintuitive, or inconsistent user interfaces. Jim Gray noted in his 1985 study that "interfaces that ask the operator for information or ask him to perform some function must be simple, consistent, and operator fault-tolerant." This insight continues to be true today.
+
+There are numerous examples over the past three decades throughout the industry where confusing or complex user interfaces, lack of confirmation or instructions, or even just unfriendly human language caused operators to do the wrong thing.
+
+> **Rule 12**: Make it easy for operators to do the right thing.
+
+#### Preventing Overload
+
+The final common contributor of impact is your customers—actual users of your workload. Successful workloads tend to get used a lot, but sometimes that usage outpaces the workload's ability to scale. Disks can become full, thread pools might get exhausted, network bandwidth might be saturated, or database connection limits can be reached.
+
+There's no failproof method to eliminate these, but proactive monitoring of capacity and utilization through Operational Health metrics provides early warnings when these failures might occur. These can be CPU, memory, disk space, thread pools, queues, or service quotas. All can be exhausted through over-utilization.
+
+Techniques like load-shedding, circuit breakers, and retry with exponential backoff and jitter can help minimize impact and increase success rate, but these situations still represent failure. Automated scaling based on Operational Health metrics can help reduce frequency of failure due to overload but might not respond quickly enough to changes in utilization.
+
+If you need to ensure continuously available capacity for customers, you have to make tradeoffs on availability and cost. One way to ensure lack of capacity doesn't lead to unavailability is provide each customer with quota and ensure your workload's capacity is scaled to provide 100% of allocated quotas. When customers exceed quota, they get throttled, which isn't failure and doesn't count against availability.
+
+You'll also need to closely track your customer base and forecast future utilization to keep enough capacity provisioned. This ensures your workload isn't driven to failure scenarios through over consumption by customers.
+
+<KeyTakeaways>
+- **Availability depends on three factors**: MTBF (failure frequency), MTTD (detection time), and MTTR (repair time)—improving any improves availability
+- **Software availability is unpredictable**: Unlike hardware with deterministic wear-out, distributed systems' failure modes are often unknowable at design time, making forward-looking availability calculations estimates rather than guarantees
+- **Sparing has diminishing returns**: More than three spares rarely provides material availability improvements when subsystems have 99%+ availability—consider the unit of failure (AZ, not instance)
+- **Static stability prevents cascading failures**: Pre-provisioning spare capacity and removing control plane dependencies from data planes ensures systems can recover without making situations worse
+- **Fault isolation limits blast radius**: Breaking systems into independent modules prevents failures from propagating, reducing overall failure rate and increasing MTBF
+- **Measure, don't just predict**: Forward-looking availability models are guides—measure actual request success rates, annual downtime, and latency to understand real customer experience
+- **Operational excellence matters**: Standardization, automation, and operator-friendly interfaces reduce the most common sources of failure in production distributed systems
+</KeyTakeaways>

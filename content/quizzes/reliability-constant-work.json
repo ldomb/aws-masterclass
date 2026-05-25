@@ -1,0 +1,60 @@
+{
+  "lessonSlug": "reliability-constant-work",
+  "questions": [
+    {
+      "question": "Route 53 health checkers send result sets sized for 10,000 health checks even when only 10 are configured, filling the remaining 9,990 slots with dummy entries. What is the PRIMARY benefit of this approach?",
+      "options": [
+        "It makes the system use more bandwidth to test network capacity",
+        "It eliminates variance in network load and aggregator work as customers add health checks, keeping performance constant",
+        "It provides better compression ratios for the data",
+        "It allows AWS to charge customers for unused capacity"
+      ],
+      "correctIndex": 1,
+      "explanation": "Sending fixed-size payloads regardless of actual health check count eliminates a major source of variance. As customers configure more health checks, network load and aggregator processing work don't increase—they're already handling the maximum. This constant work pattern ensures that performance remains predictable and reliable even as usage scales from 10 to 10,000 health checks."
+    },
+    {
+      "question": "In the AWS Hyperplane configuration system, nodes fetch configuration from S3 every few seconds and process it even if nothing changed. A colleague argues this is wasteful and suggests switching to an event-driven workflow that only pushes changes. What is the STRONGEST argument for keeping the constant work approach?",
+      "options": [
+        "S3 is cheaper than running workflow systems",
+        "The constant work approach is naturally self-healing—if configuration is corrupted or an update is missed, the next cycle automatically corrects it without building backlogs or requiring complex recovery logic",
+        "Customers prefer polling over push notifications",
+        "Event-driven systems cannot handle high throughput"
+      ],
+      "correctIndex": 1,
+      "explanation": "The self-healing property is the strongest architectural argument for constant work. The system always operates in 'repair everything' mode—each cycle starts from a clean slate. If transient corruption occurs or an update is missed, it's automatically corrected on the next pass without complex recovery procedures or backlog accumulation. While cost is a factor, the reliability and operational simplicity benefits are the primary justification for this pattern."
+    },
+    {
+      "question": "Why does Route 53 push health check status tables from aggregators to DNS servers rather than having DNS servers pull the data?",
+      "options": [
+        "Push is always faster than pull in distributed systems",
+        "DNS servers don't have the capability to make HTTP requests",
+        "There are more DNS servers than aggregators—putting the smaller service (aggregators) in control prevents the larger fleet from overwhelming the smaller one",
+        "Security regulations require push-based architectures"
+      ],
+      "correctIndex": 2,
+      "explanation": "This follows the 'smaller service in control' principle. If the larger DNS server fleet (thousands of servers) pulled from the smaller aggregator fleet (hundreds of servers), the aggregators would be overwhelmed with pull requests. By having aggregators push to DNS servers, the smaller fleet controls the rate and timing of updates, preventing overload while ensuring all DNS servers receive timely health check information."
+    },
+    {
+      "question": "Your team is debating whether to apply a constant work pattern to a customer-facing API that processes orders. The API currently handles 100-10,000 requests per second with significant variation throughout the day. When is constant work MOST appropriate?",
+      "options": [
+        "Constant work should always be used for any distributed system",
+        "Constant work is appropriate here because it eliminates all scaling concerns",
+        "Constant work is likely NOT appropriate here—it's best for configuration propagation and internal coordination where work variance creates reliability risk, not for customer-facing request processing where elastic scaling provides better cost efficiency",
+        "Constant work is only appropriate for systems with fewer than 100 requests per second"
+      ],
+      "correctIndex": 2,
+      "explanation": "Constant work is not universally applicable. It's most valuable for internal systems (like health check propagation or configuration distribution) where work variance introduces reliability risk and the cost of constant work is negligible. For customer-facing APIs with variable load, elastic scaling is more appropriate—the cost savings from scaling down during off-peak (potentially 50% reduction) benefit both customers and efficiency. Constant work for customer request processing would mean always running at peak capacity, which is wasteful."
+    },
+    {
+      "question": "A DNS server in Route 53 receives a query for a name with three potential answers. The health check status table shows answer 1 is healthy, answer 2 is unhealthy, and answer 3 is healthy. What does the DNS server do according to the constant work principle?",
+      "options": [
+        "Returns answer 1 immediately without checking answers 2 and 3 to save time",
+        "Checks all three answers against the health check table even though answer 1 is healthy, ensuring the same work is performed regardless of which answers are healthy",
+        "Only checks unhealthy answers to minimize computation",
+        "Generates an event to update the DNS record to remove answer 2"
+      ],
+      "correctIndex": 1,
+      "explanation": "The DNS server checks all potential answers against the health check status table, even if the first answer is healthy and eligible. This ensures the server performs the same work regardless of which answers are healthy or how statuses change. There's no increase in scan or retrieval time when statuses change—the code performs identical operations. This constant work approach is what makes Route 53's DNS servers extremely reliable during failures when health check statuses are changing rapidly."
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "lessonSlug": "challenges-with-distributed-systems",
+  "questions": [
+    {
+      "question": "What makes distributed systems fundamentally different from single-machine systems?",
+      "options": [
+        "Client, server, and network can fail independently without sharing fate",
+        "Distributed systems are always slower than single-machine systems",
+        "Network protocols like TCP/IP are difficult to understand",
+        "Distributed systems require more expensive hardware"
+      ],
+      "correctIndex": 0,
+      "explanation": "The fundamental difference is that in distributed systems, the client machine, server machine, and network do not share fate—they can fail independently of each other. This means a network failure doesn't crash the client or server, creating complex failure scenarios that don't exist in single-machine systems where all components share the same fate."
+    },
+    {
+      "question": "In a distributed system, when a client sends a request and receives a timeout, what does the UNKNOWN error type mean?",
+      "options": [
+        "The request definitely failed and had no effect",
+        "The request was received but not processed",
+        "The server may have received and processed the request, or it may not have—the client cannot determine which occurred",
+        "The network lost the request before it reached the server"
+      ],
+      "correctIndex": 2,
+      "explanation": "UNKNOWN represents fundamental uncertainty in distributed systems. When a timeout occurs, the request might have succeeded, failed, or been received but not processed. The client genuinely cannot determine what happened, which is why handling UNKNOWN correctly is one of the hardest challenges in distributed systems engineering."
+    },
+    {
+      "question": "You're testing a distributed Pac-Man game with 4 network calls to a board object, where each call has 5 possible outcomes (POST_FAILED, RETRYABLE, FATAL, UNKNOWN, SUCCESS). If the single-machine version had 10 test scenarios, approximately how many test scenarios does the distributed version require?",
+      "options": [
+        "50 scenarios (10 × 5)",
+        "200 scenarios (10 × 5 × 4)",
+        "40 scenarios (10 × 4)",
+        "14 scenarios (10 + 4)"
+      ],
+      "correctIndex": 1,
+      "explanation": "The distributed version requires approximately 200 test scenarios. Each of the 10 original scenarios must be tested with all 5 possible outcomes for each of the 4 network calls (10 × 5 × 4 = 200). This demonstrates how distributed systems cause test complexity to explode exponentially, as you can't assume that if one call succeeds, the next will also succeed."
+    },
+    {
+      "question": "Which type of distributed system is generally the MOST difficult to build correctly?",
+      "options": [
+        "Offline batch processing systems like movie rendering farms",
+        "Soft real-time systems like search index builders",
+        "Hard real-time request/reply services like payment APIs",
+        "Big data analysis clusters"
+      ],
+      "correctIndex": 2,
+      "explanation": "Hard real-time request/reply services are the most difficult because requests arrive unpredictably and responses must be given rapidly while the customer actively waits. Examples include payment processing, web servers, and AWS APIs. These systems get fewer benefits from the generous time windows that make offline and soft real-time systems easier to build."
+    },
+    {
+      "question": "A single catalog server at Amazon had its disk fill up, causing it to return empty responses very quickly. The load balancer noticed these 'fast' responses and sent more traffic to this failed server, taking down the entire website. What distributed systems principle does this illustrate?",
+      "options": [
+        "Distributed bugs spread epidemically because they inherently involve the network that links machines together",
+        "Load balancers should never consider response speed when routing traffic",
+        "Disk space monitoring is more important than network monitoring",
+        "Single points of failure should always be eliminated"
+      ],
+      "correctIndex": 0,
+      "explanation": "This incident illustrates that distributed bugs spread epidemically. Because distributed bugs necessarily involve the network (the only thing linking machines together), they're more likely to propagate to other machines. In this case, a single server's problem cascaded through the load balancer to impact the entire system—a failure mode that could only occur in a distributed context."
+    }
+  ]
+}

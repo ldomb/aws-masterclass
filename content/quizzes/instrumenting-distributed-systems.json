@@ -1,0 +1,60 @@
+{
+  "lessonSlug": "instrumenting-distributed-systems",
+  "questions": [
+    {
+      "question": "Your service processes API requests with highly variable latency. Recent metrics show p50 latency at 50ms but p99 at 2000ms. Your manager suggests optimizing the median latency first since it affects more users. What should you recommend based on Amazon's approach?",
+      "options": [
+        "Focus on reducing p99 and p99.9 latency first, as improving high percentiles typically reduces median latency as a side effect, and high percentile issues can cascade through service-oriented architectures",
+        "Follow the manager's suggestion since median latency affects 50% of requests versus p99 affecting only 1%",
+        "Split the difference and optimize p90 latency as a balanced approach",
+        "Optimize both simultaneously by adding more servers to handle peak load"
+      ],
+      "correctIndex": 0,
+      "explanation": "Amazon focuses intensely on high percentile latency (p99.9, p99.99) because: (1) reducing high percentiles typically reduces median latency as a side effect (but not vice versa), and (2) in service-oriented architectures, high latency in one service deep in the call chain has a multiplier effect on end-user experience. Even affecting 'only' 1 in 100 or 1 in 1,000 requests still represents poor customer experience."
+    },
+    {
+      "question": "You're instrumenting a new order processing service that queries a user database, a product catalog, and an inventory system for each order. The service currently logs only request IDs and final success/failure status. What instrumentation would provide the most operational value?",
+      "options": [
+        "Add separate timers and counters for each dependency call, including latency percentiles, error types, retry counts, and break out metrics per resource accessed (user ID, product ID, inventory location)",
+        "Add a single 'total dependency time' metric to track how long all backend calls take combined",
+        "Log detailed SQL queries and API request payloads to enable full troubleshooting",
+        "Add DEBUG-level logging showing the execution flow through each code path"
+      ],
+      "correctIndex": 0,
+      "explanation": "Amazon's best practice is to log availability and latency of all dependencies, breaking out metrics per call, per resource, and per status code. This enables answering 'why was this request slow?' without guessing from comparing graphs. Detailed timers per dependency, error categorization, and resource-level breakdown provide the visibility needed to quickly identify which dependency or resource is causing issues during operational events."
+    },
+    {
+      "question": "Your service processes 50,000 requests per second. Logging every request in detail creates 200 GB of logs daily, and the log shipping agent is consuming 15% CPU. Storage and network costs are significant. What optimization approach best aligns with Amazon's practices?",
+      "options": [
+        "First verify the service can sustain this load long-term, then consider frequent log rotation (every minute), offloading serialization to separate threads, and writing pre-compressed logs before implementing sampling",
+        "Implement immediate log sampling at 10% to reduce volume by 90% and cut costs",
+        "Switch to logging only errors and requests slower than p95 latency",
+        "Aggregate metrics in-memory and flush every 5 minutes instead of logging per request"
+      ],
+      "correctIndex": 0,
+      "explanation": "Even DynamoDB at 20+ million requests per second logs every request for troubleshooting and compliance. Amazon's high-throughput optimization sequence prioritizes: (1) load testing to verify sustainability, (2) efficiency improvements (frequent rotation, separate threads, pre-compression), and (3) sampling only when necessary, as it loses the ability to troubleshoot specific customer requests. The question shows sustainable load (15% CPU), so efficiency improvements come before sampling."
+    },
+    {
+      "question": "During troubleshooting, you discover that your structured request logs don't include trace IDs, making it impossible to correlate a failed request across your service and three downstream microservices. What implementation approach would Amazon recommend?",
+      "options": [
+        "Pass a Context object containing the trace ID through method signatures, explicitly propagating it to all downstream service calls and including it in every log entry",
+        "Use ThreadLocal storage to automatically propagate trace IDs without changing method signatures",
+        "Rely on OpenTelemetry auto-instrumentation to automatically inject and propagate trace IDs across all services",
+        "Add trace IDs only to error logs since successful requests don't need correlation"
+      ],
+      "correctIndex": 0,
+      "explanation": "Amazon has found it important to explicitly pass trace IDs (often via Context objects) in method signatures. In multi-threaded environments, automatic propagation via frameworks is very difficult and error-prone. Explicit passing ensures correctness and enables future extensibility for similar patterns. While OpenTelemetry and AWS X-Ray provide some automatic propagation, Amazon teams explicitly propagate trace IDs to ensure complete coverage and support customer troubleshooting needs."
+    },
+    {
+      "question": "Your service logs an ErrorCount metric that's only emitted when errors actually occur. During a recent incident, the metric showed no data for several hours. Operators couldn't determine if there were zero errors (good) or if monitoring was broken (bad). How should you fix this?",
+      "options": [
+        "Modify the service to continuously emit ErrorCount=0 when no errors occur, so missing data clearly indicates monitoring failure rather than success",
+        "Add dashboard text explaining that no data means no errors occurred",
+        "Configure the monitoring system to interpret missing data as zero errors",
+        "Switch from ErrorCount to an AvailabilityPercentage metric calculated from total requests"
+      ],
+      "correctIndex": 0,
+      "explanation": "Amazon's best practice for sparse metrics is to modify services to continually emit safe (zero) values in the absence of the condition being measured. This makes it immediately clear whether missing data represents normal operation or monitoring failure. Emitting zero values also enables calculating availability percentages directly (emit 1 for success, 0 for failure, average becomes availability rate) without additional instrumentation."
+    }
+  ]
+}

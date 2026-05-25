@@ -1,0 +1,60 @@
+{
+  "lessonSlug": "queue-backlogs",
+  "questions": [
+    {
+      "question": "Your asynchronous processing system experiences a 1-hour outage while receiving messages at a constant rate. The system has exactly enough capacity to handle the normal rate. How long will recovery take after the outage is resolved?",
+      "options": [
+        "Immediate - the system will catch up as it processes the queue",
+        "1 hour - same as the outage duration",
+        "2 hours - requires double capacity for the recovery period",
+        "30 minutes - half the outage duration due to parallel processing"
+      ],
+      "correctIndex": 2,
+      "explanation": "Recovering from the backlog requires double the system's normal capacity for a period equal to the outage duration. With exactly the normal capacity available, it takes 2 hours: 1 hour to handle new incoming messages + 1 hour to work through the backlog. This is why backlogs dramatically increase recovery time."
+    },
+    {
+      "question": "You're monitoring an AWS IoT system with many devices that frequently go offline. Which metric best detects system-wide processing problems vs. expected device behavior?",
+      "options": [
+        "Total message count in queue",
+        "Consumer-side error rate",
+        "AgeOfFirstAttempt - age of messages on their first delivery attempt",
+        "Dead-letter queue volume"
+      ],
+      "correctIndex": 2,
+      "explanation": "AgeOfFirstAttempt filters out noise from devices retrying messages or reading slowly. It only measures age on the first attempt, providing a clean metric for system-wide problems. Total queue age includes retry delays, consumer errors are misleading (retries may succeed), and DLQ detection is too late."
+    },
+    {
+      "question": "Your Lambda-based system serves 10,000 customers through a single SQS queue. One customer suddenly sends 50x their normal traffic. What's the best protection strategy?",
+      "options": [
+        "Increase Lambda concurrency limits to handle the spike",
+        "Use shuffle-sharding - hash customers to multiple queues and route to least-full",
+        "Implement a single queue with strict FIFO ordering",
+        "Scale the SQS queue to handle higher throughput"
+      ],
+      "correctIndex": 1,
+      "explanation": "Shuffle-sharding (used by AWS Lambda) provides resource isolation without needing separate queues per customer. Hashing each customer to a small number of queues and choosing the least-full queue means one customer's spike drives backlog only in their mapped queues, while other workloads route away. This doesn't require many queues to achieve magical isolation."
+    },
+    {
+      "question": "Your message processor handles 100 messages/sec at 100ms average latency, using 10 threads. A dependency suddenly becomes slow, increasing latency to 10 seconds. According to Little's Law, how many threads will you now need?",
+      "options": [
+        "10 threads - same as before",
+        "100 threads - proportional to the latency increase",
+        "1,000 threads - arrival rate × new average latency",
+        "50 threads - half of 100 messages/sec"
+      ],
+      "correctIndex": 2,
+      "explanation": "Little's Law: Concurrency = Arrival Rate × Average Latency. With 100 messages/sec and 10-second latency, you need 100 × 10 = 1,000 threads. This 100x increase can exhaust thread pools, which is why AWS IoT rules engine uses non-blocking I/O, semaphores, and rate-based limiting to prevent one workload from consuming all threads."
+    },
+    {
+      "question": "Your SQS consumer dequeues messages but occasionally forgets to delete them due to an exception-handling bug. What problem does this create?",
+      "options": [
+        "Messages are permanently lost from the queue",
+        "Duplicate processing when messages are eventually deleted",
+        "Messages remain in-flight, potentially exhausting SQS in-flight limits and cascading to multiple processors",
+        "Increased storage costs from retaining old messages"
+      ],
+      "correctIndex": 2,
+      "explanation": "Messages not deleted remain in-flight for their VisibilityTimeout period. This inflates in-flight message counts, potentially hitting SQS limits. Worse, if processing takes longer than the timeout, the message gets delivered to another processor while the first is still working—creating cascading brownouts where multiple processors churn on the same message."
+    }
+  ]
+}

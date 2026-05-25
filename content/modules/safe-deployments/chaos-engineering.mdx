@@ -1,0 +1,689 @@
+## Introduction
+
+At Amazon, there's a fundamental understanding that **failure is inevitable in distributed systems**. In fact, functioning despite the presence of failures is considered a normal mode of operation. Because interactions between services are bound to fail, organizations need to understand how their services react during various failure modes and build systems that are resilient to key vulnerabilities—dependency failures, retry storms, impaired Availability Zones, and host resource exhaustion.
+
+**Chaos engineering** is the discipline of experimenting on an application to build confidence in your organization's and application's capability to withstand turbulent conditions in production. It's a proactive approach to resilience, with the goal to verify if your application and organization can absorb, adapt to, and eventually recover from service impairments by introducing controlled failures across people, processes, and technology. The intent is to identify and eliminate weaknesses before they cause outages or other disruptions in production.
+
+### The Butterfly Effect: Retry Storms
+
+Consider a **retry storm**—a manifestation of the "butterfly effect" in distributed systems where a small localized failure cascades into a massive system-wide problem. A localized failure in a client can impact multiple services significantly.
+
+When a failing dependency triggers clients (and clients of those clients) to retry the failed operation, it leads to exponential traffic growth. Services become overloaded responding to regular traffic plus retry traffic while handling degraded performance.
+
+<Mermaid title="Retry Storm Leading to Cascading Failure" chart={`graph LR
+    A[Service A<br/>100 req/s] --> B[Service B<br/>fails]
+    B --> C[A retries<br/>300 req/s]
+    C --> D[Upstream<br/>retries]
+    D --> E[900 req/s]
+    E --> F[B overloaded]
+    F --> G[Cascading<br/>failure]
+
+    style B fill:#FFB6C1,color:#1a1a1a
+    style E fill:#FF6B6B,color:#fff
+    style G fill:#DC143C,color:#fff
+`} />
+
+Chaos engineering helps teams discover these scenarios before they occur in production, allowing them to build proper circuit breakers, backoff strategies, and bulkheads to prevent cascade failures.
+
+## Chaos Engineering vs. Resilience Testing
+
+Understanding the distinction between traditional resilience testing and chaos engineering is crucial for implementing effective practices. While both aim to improve system reliability, they approach the problem from fundamentally different angles.
+
+### Resilience Testing: Deterministic Validation
+
+**Resilience testing is deterministic**. It validates known characteristics about resilience mechanisms like circuit breakers, retries, failovers, and fallbacks that have been implemented in your application. It confirms how these components absorb controlled disruptions with minimal user impact.
+
+Resilience testing focuses on validation of **known failure modes** injected into application components with the goal of producing **pass/fail results**. These tests run continuously as pipeline steps to ensure you don't introduce regressions to your resilience posture.
+
+**Key Characteristics**:
+- Tests against mock APIs that simulate certain components
+- Consistent, reproducible testing in controlled environments
+- Suitable for automated pipeline integration
+- Binary outcomes (pass/fail)
+- Validates that implemented mechanisms work as designed
+
+**Example Resilience Test**:
+```python
+def test_circuit_breaker():
+    # Arrange: Configure mock to fail
+    mock_service.configure_failure_rate(100%)
+
+    # Act: Make requests until circuit opens
+    for i in range(10):
+        response = client.call_service()
+
+    # Assert: Circuit breaker should be open
+    assert client.circuit_breaker.is_open()
+    assert client.call_service().status == "CIRCUIT_OPEN"
+```
+
+### Chaos Engineering: Non-Deterministic Discovery
+
+**Chaos engineering is non-deterministic**. It's hypothesis-based and verifies your mental model on how the application and its dependencies (people, processes, and technology) absorb, adapt to, and recover from **unanticipated failure modes**.
+
+Chaos engineering focuses on end-to-end verification of **unknown failure modes**, with the goal of catching defects early and remediating them before they turn into large-scale events. It fosters continuous learning and should be practiced through a separate chaos pipeline or ad-hoc experiments that enable running multiple experiments at any point without blocking developer productivity.
+
+**Key Characteristics**:
+- Tests against real components in real environments
+- Hypothesis-driven exploration
+- Discovers unknown weaknesses
+- Validates mental models and assumptions
+- Reveals gaps in observability, runbooks, and automation
+
+| Aspect | Resilience Testing | Chaos Engineering |
+|--------|-------------------|-------------------|
+| **Nature** | Deterministic | Non-deterministic |
+| **Goal** | Validate known mechanisms | Discover unknown weaknesses |
+| **Scope** | Component-level | End-to-end system |
+| **Environment** | Often mocked | Real or production-like |
+| **Frequency** | Continuous (in pipeline) | Periodic (game days, scheduled) |
+| **Outcome** | Pass/Fail | Learnings and improvements |
+
+<Callout type="info">
+The chaos engineering process often begins with a **chaos game day**—a dedicated event where teams intentionally inject controlled faults into their application. It starts in lower environments (development, testing) and gradually advances to higher environments (staging, pre-production) as confidence builds.
+</Callout>
+
+By systematically moving through environments, teams verify that systems tolerate injected faults properly before reaching production. This methodical progression ensures that by the time chaos experiments run in production, teams have built substantial confidence in their system's resilience capabilities. The game day process is a proactive approach to identifying weaknesses and vulnerabilities while eliminating the stress of learning during an unexpected production outage.
+
+## The Value of Chaos Engineering
+
+Complex systems are ubiquitous in today's world and play critical roles in many aspects of our lives—from financial markets to healthcare, from e-commerce to cloud infrastructure. We expect these systems to be always operational. However, they're often vulnerable to unexpected events and behaviors that can have significant consequences.
+
+Organizations need to **plan for disruption** instead of wondering whether it will happen. They can do that by applying scenario testing across their critical or mission-critical business services. This is where chaos engineering comes into play.
+
+### Deepening System Understanding
+
+Chaos engineering offers an approach to manage complex systems that helps mitigate risks and improve resilience. The process of preparing for chaos experiments requires teams to develop hypotheses about their system's behavior, which deepens understanding of how systems are built and operate.
+
+This preparation often reveals:
+- **Mental gaps**: Assumptions about system behavior that don't match reality
+- **Architectural insights**: Hidden dependencies or bottlenecks
+- **Operational knowledge**: Procedures that need updating or automation
+
+<Mermaid title="Chaos Experiment Planning Process" chart={`graph TD
+    A[Chaos Experiment Planning] --> B[Hypothesis Development]
+    B --> C[System Architecture Review]
+    C --> D[Mental Gap Discovery]
+    C --> E[Dependency Mapping]
+    C --> F[Operational Procedures Review]
+
+    D --> G[Better Preparedness]
+    E --> G
+    F --> G
+
+    G --> H[Improved Resilience]
+    H --> I[Minimal User Impact]
+
+    style A fill:#e1f5ff,color:#1a1a1a
+    style G fill:#FFE4B5,color:#1a1a1a
+    style I fill:#90EE90,color:#1a1a1a
+`} />
+
+By furthering understanding of how complex systems react to failures, chaos engineering promotes greater **transparency and accountability** in system design and management. The more frequently your organization practices chaos engineering, the better prepared they become operationally.
+
+This helps establish best practices for designing resilient applications that can survive component failures with minimal to no user impact, ensuring that critical applications operate within expected service levels and impact tolerance while continuously enhancing the team's knowledge of their own systems.
+
+### Preparing for Adverse Conditions
+
+When you build on AWS, you use different types of services, each exposing different failure domains:
+
+| Service Type | Example Services | Failure Domain |
+|--------------|-----------------|----------------|
+| **Zonal Services** | Amazon EC2, Amazon EBS | Availability Zone |
+| **Regional Services** | Amazon S3, Amazon DynamoDB | AWS Region |
+| **Global Services** | Amazon CloudFront, AWS IAM | Global infrastructure |
+| **Third-Party SaaS** | External APIs, Payment processors | Third-party systems |
+| **On-Premises** | Legacy systems, databases | On-premises infrastructure |
+
+How do you prepare for self-inflicted events, or events that are caused by third parties that your organization has no control over?
+
+AWS Fault Injection Service (AWS FIS) is a fully managed service for running fault injection experiments in a controlled way. You can use this service to inject AWS-provided scenarios such as **Availability Zone power interruptions** and **cross-Region connectivity issues**, or build your own experiments by chaining together a wide variety of fault actions provided by the service.
+
+AWS FIS enables your teams to continuously practice and learn how their application would react to common faults and remediate defects as they detect them.
+
+**Try it yourself:** Experiment with the interactive simulation below to see how failure cascades propagate through distributed systems and how resilience mechanisms like circuit breakers can contain them.
+
+<FailureCascadeDemo />
+
+## Essential Foundations for Chaos Engineering
+
+Before conducting experiments, Amazon recommends putting essentials in place to maximize the value of chaos engineering practices. Without these foundations, chaos experiments may not provide meaningful insights or could even cause unintended harm.
+
+### Observability: The Foundation
+
+Observability—comprising metrics, logging, and request tracing—plays a key role in chaos engineering. **Without observability, you can't define steady-state behavior or create meaningful experiments** to verify hypotheses.
+
+#### Business Metrics: Defining Steady State
+
+**Steady state** indicates normal operation and is defined by business metrics like transactions per second, click streams per second, or orders per second. Your application exhibits steady state when operating as expected. This is your baseline.
+
+For example, a payments system's steady state might be:
+- Processing **300 TPS** (transactions per second)
+- **99% success rate**
+- **500ms round-trip time**
+
+Visually, think of steady state as an electrocardiogram (EKG)—if it suddenly fluctuates, there's a problem with your service.
+
+<Callout type="tip">
+Steady state doesn't mean zero impact when faults occur. A percentage of faults could be within acceptable limits. The key is knowing your baseline and detecting deviations. For example, the steady state might tolerate 1% fault rate, so seeing 2% during an experiment indicates potential issues.
+</Callout>
+
+#### Server-Side Metrics
+
+To understand resource performance during experiments, you need insights before, during, and after. Amazon CloudWatch provides this visibility for AWS resources. During experiments, capture:
+
+- **Saturation**: CPU, memory, disk, network utilization
+- **Request volumes**: Requests per second, concurrent connections
+- **Error rates**: 4xx errors, 5xx errors, timeout rates
+- **Latency**: P50, P90, P99, P99.9 response times
+
+#### Customer Experience Metrics
+
+Capture real user metrics using CloudWatch RUM or simulate user requests through tools like Locust, Grafana k6, Selenium, or Puppeteer. Real user metrics are crucial for organizations that conduct chaos engineering experiments because monitoring how real users are impacted during an experiment provides an accurate picture of how faults and disruptions will affect customers in production.
+
+Key client experience metrics:
+- **Time to First Byte (TTFB)**: Server responsiveness
+- **Largest Contentful Paint (LCP)**: Loading performance
+- **Interaction to Next Paint (INP)**: Interactivity
+- **Total Blocking Time (TBT)**: Main thread blocking
+
+#### Operations Metrics
+
+Interventions measure how successfully you mitigate faults automatically—for example, successful request latency during pod reboots with replication controllers or automatic scaling. Being able to automatically intervene during a fault directly correlates with a good user experience.
+
+Understanding if there is any drift in these mitigation mechanisms over time is crucial. By defining metrics for both successful and failed automated mitigations, you create guideposts that help identify potential regressions throughout your system.
+
+### Centralized Logging and Request Tracing
+
+**Centralized logging** is key to understanding component states before, during, and after chaos experiments. Collect logs from all application components to build a consolidated view of what each component was doing when the experiment was injected. This provides a clear picture of the end-to-end experiment flow.
+
+**Request tracing** (using AWS X-Ray) enables observing the flow of any single request across components to understand the impact of injected failures. By tracing requests, you can see how failures propagate through services and components, better assessing the disruption's scope.
+
+Example trace during an experiment:
+```
+Request ID: abc-123-def-456
+  → API Gateway (15ms) [SUCCESS]
+  → Lambda Function A (45ms) [SUCCESS]
+    → DynamoDB Query (8ms) [SUCCESS]
+  → Lambda Function B (120ms) [THROTTLED - CHAOS INJECTED]
+    → S3 GetObject (TIMEOUT - CASCADING FAILURE)
+  → Total: 188ms [FAILED]
+```
+
+This trace clearly shows how throttling Lambda Function B caused a cascading failure to S3, revealing a dependency that wasn't properly handling downstream throttling.
+
+## Common Failure Scenarios
+
+The goal of injecting common faults is understanding how applications react to unexpected events so you can create mitigation mechanisms. Additionally, use chaos engineering to **replay historical failure scenarios** to verify that mitigation mechanisms still function as expected and haven't drifted over time.
+
+Consider these events when planning experiments:
+
+### Infrastructure Failures
+
+| Failure Mode | Description | Chaos Experiment |
+|--------------|-------------|------------------|
+| **Server Impairment** | Instance crashes, hangs, or becomes unresponsive | Reboot EC2 instances, delete Kubernetes pods or ECS tasks to understand application reaction to crashes |
+| **AWS AZ Impairment** | Entire data center becomes unavailable | Replay impairment of an entire Availability Zone to verify cross-zone recovery and validate multi-AZ architecture |
+| **Network Issues** | Latency, packet loss, connection failures | Introduce latency (100-1000ms), congestion, or block connections to mimic real-world network problems |
+| **AWS Region Connectivity** | Cross-region network partition | Replay network impairment across Regions to verify how secondary Region resources react to such an event |
+
+### Data and Storage Failures
+
+| Failure Mode | Description | Chaos Experiment |
+|--------------|-------------|------------------|
+| **Database Failures** | Primary fails, replica lag, connection pool exhaustion | Fail over database replicas, simulate replica lag, or make database instances unreachable to understand impact and recovery |
+| **Replication Pauses** | Asynchronous replication stops | Pause database or S3 replication across AZs or Regions to understand downstream application impact on stale data |
+| **Storage Degradation** | I/O throttling, volume failures | Pause I/O, remove EBS volumes, or delete files to verify data durability, recovery procedures, and backup restoration |
+
+### Application and Service Failures
+
+| Failure Mode | Description | Chaos Experiment |
+|--------------|-------------|------------------|
+| **API Errors** | Service returns errors or degrades | Inject faults into AWS and service APIs (throttling, 500 errors, timeouts) to understand application behavior and retry logic |
+| **Dependency Impairment** | Upstream or downstream service degradation | Degrade downstream/upstream services including third-party services to understand end-to-end flow and fallback behavior |
+| **Resource Exhaustion** | CPU, memory, or disk space fills up | Max out CPU, memory, and disk to verify graceful degradation, alerting, and auto-scaling triggers |
+| **Traffic Surges** | Sudden spike in load | Generate traffic spikes to test automatic scaling capabilities, and see how cold boot time might impact overall application state |
+
+### Deployment and Configuration Failures
+
+| Failure Mode | Description | Chaos Experiment |
+|--------------|-------------|------------------|
+| **Bad Deployments** | Buggy code or configuration deployed | Roll out problematic changes or configurations to verify rollback mechanisms, canary deployment effectiveness, and monitoring |
+| **Cascading Failures** | Failure in one component triggers failures elsewhere | Initiate primary failures that cascade to downstream applications and components to verify circuit breakers and bulkheads |
+
+## Practicing Controlled Chaos Engineering
+
+The key principles of controlled chaos experiments ensure that you gain valuable insights while minimizing risk to production systems and customers.
+
+### Core Principles
+
+1. **Start with production-like environments**: Test in environments that mirror production characteristics
+2. **Establish hypothesis and stop conditions**: Define expected behavior and automatic experiment termination criteria
+3. **Start small**: Begin with low-impact experiments and gradually increase scope
+4. **Exercise control over experiments**: Use safety mechanisms to prevent runaway failures
+5. **Set scope of impact**: Limit the blast radius of experiments
+6. **Know your service baseline**: Understand normal behavior before injecting faults
+7. **Schedule experiments**: Run during business hours when teams can respond
+8. **Remediate first, then experiment**: Fix known issues before introducing new failures
+9. **Monitor closely**: Watch all relevant metrics during experiments
+10. **Learn from results**: Document findings and share across teams
+11. **Prioritize findings and verify**: Fix critical issues before new features
+12. **Propagate learnings**: Share knowledge across the organization
+
+### Using AWS Fault Injection Service
+
+AWS FIS is a fully managed service for running fault injection experiments in a controlled way. You can inject AWS-provided scenarios like Availability Zone power interruptions and cross-Region connectivity issues, or build custom experiments by chaining fault actions.
+
+**Integration with AWS Resilience Hub**: As of December 2024, AWS Resilience Hub provides tailored FIS experiment recommendations based on your application's architecture. Rather than manually determining which chaos experiments would be most impactful, Resilience Hub analyzes your application components and suggests experiments that target your specific weaknesses. You can launch recommended FIS experiments directly from the Resilience Hub console with one click, streamlining the path from resilience assessment to active testing. Your resilience score improves when you run the recommended experiments and validate that your application handles the injected faults appropriately, creating a feedback loop that incentivizes continuous chaos engineering practice.
+
+#### Stop Conditions: Automatic Experiment Termination
+
+Create **stop conditions** using CloudWatch alarms. Incorporate these into experiment templates to ensure experiments stop if out of bounds and roll back to last known state.
+
+**Example Stop Condition Configuration**:
+```yaml
+stopConditions:
+  - source: aws:cloudwatch:alarm
+    value: arn:aws:cloudwatch:us-east-1:123456789012:alarm:HighErrorRate
+  - source: aws:cloudwatch:alarm
+    value: arn:aws:cloudwatch:us-east-1:123456789012:alarm:HighP99Latency
+  - source: aws:cloudwatch:alarm
+    value: arn:aws:cloudwatch:us-east-1:123456789012:alarm:LowSuccessRate
+```
+
+If any of these alarms trigger during the experiment, AWS FIS automatically:
+1. Stops the experiment immediately
+2. Rolls back any injected faults
+3. Records the stop reason
+4. Notifies operators
+
+#### Safety Levers: Emergency Stop Mechanism
+
+When engaged, **safety levers** in AWS FIS stop and roll back **all running experiments** in the account in the Region (including multi-account experiments) and prevent new experiments from starting.
+
+This prevents fault injection during critical periods like:
+- Trading hours for financial services
+- Sales events (Black Friday, Prime Day)
+- Product launches
+- Active incidents or degradations
+- Maintenance windows
+
+The safety lever remains engaged until manually disengaged, providing a reliable way to prevent any chaos engineering activity during sensitive times.
+
+### Defining Safeguards
+
+When you conduct a chaos experiment, define safeguards to prevent undesirable side-effects in the environment, especially if there's a possibility that the experiment will affect applications in production.
+
+**Planning Safeguards**:
+1. **Blast Radius Limits**: Use tags or resource filters to limit which resources can be affected
+2. **Percentage Limits**: Only affect a small percentage (e.g., 10-20%) of resources
+3. **Time Limits**: Set maximum duration for fault injection
+4. **Rollback Procedures**: Document and automate rollback steps
+5. **Communication Plan**: Notify relevant teams before experiments
+
+**Example Safeguards**:
+```yaml
+targets:
+  myInstances:
+    resourceType: aws:ec2:instance
+    resourceTags:
+      - key: Environment
+        value: staging
+      - key: ChaosReady
+        value: "true"
+    selectionMode: PERCENT(15)  # Only 15% of matching instances
+```
+
+When planning the experiment, anticipate any adverse effects it might have on other applications in the environment. For example, other applications could:
+- Receive erroneous messages from the application under test
+- Experience high request volumes
+- Encounter resource contention if they share infrastructure
+
+Document these risks and address any known or unacceptable issues before running the experiment.
+
+## Implementing Chaos Engineering
+
+Chaos engineering can be implemented in different ways depending on your organization's maturity, goals, and operational practices.
+
+### Implementation Approaches
+
+**Ad Hoc Experiments**: One-time experiments to address specific issues or questions. Useful for investigating particular concerns or validating fixes for known issues.
+
+**Chaos Game Days**: Structured, recurring events designed to verify reliability and resilience. These identify potential issues across people, processes, and technologies, and practice procedures for identifying, mitigating, and responding to incidents.
+
+Game days typically involve:
+- Cross-functional team participation (developers, SREs, product managers)
+- Defined scenarios and success criteria
+- Real-time collaboration and problem-solving
+- Post-game analysis and action items
+
+**Chaos Pipeline**: Create a separate pipeline from your CI/CD pipeline for chaos experiments. At scale, chaos engineering needs its own pipeline allowing experiments to run parallel to the software development lifecycle without blocking deployments.
+
+Why a separate pipeline matters:
+- **Avoid blocking deployments**: A single chaos experiment taking 15 minutes across 100 parallel deployments would require 1500 minutes (25 hours)
+- **Run multiple experiments**: With 10 experiments, the impact becomes unbearable
+- **Independent scheduling**: Chaos experiments can run on different cadences than deployments
+
+**Canary Deployments**: Canaries provide testing environments for chaos experiments. By directing small traffic percentages to canary services or using traffic mirroring/replay, you can verify new infrastructure or code changes with zero impact to stable production.
+
+Benefits:
+- Test changes under realistic failure conditions before full rollout
+- Validate resilience of new features
+- Build confidence in deployments
+
+**Scheduled Experiments**: Schedule experiments to verify predictable recovery mechanisms. Replay commonly known events to capture how systems recover from scenarios like:
+- Terminating EC2 instances behind auto-scaling groups
+- Removing Kubernetes pods
+- Deleting ECS tasks
+- Database failovers
+
+Scheduled experiments ensure that:
+- Auto-healing mechanisms still work
+- Runbooks are up-to-date
+- Teams remain practiced in recovery procedures
+
+## The Chaos Experiment Lifecycle
+
+Building meaningful chaos experiments requires understanding the application, historical incidents, implemented remediations, and clearly understanding areas to investigate. Your knowledge helps formulate hypotheses on potential weaknesses and understand how the application will detect, remediate, and recover when faults are injected.
+
+### Step 1: Define Objectives and Set Expectations
+
+Before each experiment, make sure that your objectives and expectations are **specific, measurable, achievable, relevant, and time-bound (SMART)**.
+
+Clearly define:
+
+**Identify Potential Failures**: Identify possible failure modes (server crashes, network failures, software bugs) and assess their potential impact on system performance and reliability.
+
+**Quantify Impact**: Define **Key Risk Indicators (KRIs)** on your systems and services. Measure the effect of failures when metrics such as latency, throughput, and error rates deviate from steady state. By understanding the impact of deviations, you can prioritize mitigation efforts based on business risk.
+
+**Develop Mitigation Strategies**: Identify potential solutions (redundancy, error correction, fallback strategies) and test their effectiveness in a controlled environment. Verify these strategies work to prevent or mitigate failures before deploying them in production.
+
+**Improve Incident Response**: By replaying failures in a controlled environment, test incident response processes, identify bottlenecks or gaps, and refine disaster recovery procedures. This ensures teams are prepared to respond quickly and effectively during unexpected failures.
+
+### Step 2: Select the Target Application
+
+Chaos engineering is powerful but requires thoughtful prioritization to maximize value. When deciding where to focus efforts, start by considering your business's **critical services**—those directly tied to revenue, customer experience, and core operations.
+
+**Prioritization Strategy**:
+
+1. **Business-Critical Services**: Trading systems, order systems, payment processing—services whose failure impacts revenue or customer trust
+2. **Foundational Components**: Databases, message queues, networks, shared services APIs—components used across your organization where failures cause widespread problems
+3. **Customer-Facing Services**: APIs, web frontends, mobile backends—services that directly affect customer experience
+
+<Mermaid title="Chaos Engineering ROI by Service Tier" chart={`graph TD
+    A[Chaos Engineering ROI] --> B[Tier 1: Business Critical]
+    A --> C[Tier 2: Foundational]
+    A --> D[Tier 3: Supporting]
+
+    B --> E[Highest ROI<br/>Direct revenue impact]
+    C --> F[High ROI<br/>Wide blast radius]
+    D --> G[Medium ROI<br/>Limited impact]
+
+    style B fill:#90EE90,color:#1a1a1a
+    style C fill:#FFE4B5,color:#1a1a1a
+    style D fill:#e1f5ff,color:#1a1a1a
+`} />
+
+Don't forget to map mental gaps in people, processes, facilities, information, and third-party dependencies—these can cause major disruptions if they aren't aligned with your organization's impact tolerance objectives.
+
+### Step 3: Align Mental Maps (Application Discovery)
+
+When you run ad-hoc experiments or game days, begin the application discovery process by holding a whiteboarding session that focuses on mapping out your application details.
+
+**Effective Discovery Process**:
+1. **Start with junior team members**: Have the most junior team member draw a diagram of the application first
+2. **Progressive refinement**: Ask more senior staff members to add to the diagram progressively
+3. **Uncover gaps**: This reveals any gaps in understanding across experience levels
+4. **Include dependencies**: Depict both direct upstream and downstream dependencies, plus critical third-party integrations
+5. **Map workflows**: Ensure alignment on expected flow of requests through the application
+6. **Create sequence diagrams**: Map out key workflows and user journeys
+
+After this collaborative session, the team should have a shared mental model of the application, its critical dependencies, monitoring capabilities, and understanding of the risks to make an informed decision to proceed with or cancel a potential chaos experiment.
+
+### Step 4: Address Known Issues
+
+Chaos engineering experiments are designed to proactively surface defects in an application. However, this assumes an underlying level of stability and health in the target application.
+
+<Callout type="warning">
+Running chaos experiments on an already problematic application risks masking deeper issues. Before undertaking chaos engineering, teams should resolve any known defects, bugs, and performance problems in their application.
+</Callout>
+
+**Prerequisites for Chaos Experiments**:
+- All known critical bugs fixed
+- Performance issues addressed
+- Monitoring and alerting functional
+- Recent deployments stable
+- No ongoing incidents
+
+### Step 5: Define Hypothesis and Experiment
+
+Past incidents that have caused disruptions can serve as excellent sources for chaos experiment ideas. For example, were previous outages triggered by configuration errors or missing resilience patterns? Reviewing incident histories and replaying root causes through chaos experiments is effective for developing resilience against similar issues.
+
+**Sources of Experiment Ideas**:
+
+1. **Historical Incidents**: Review post-mortems and recreate failure scenarios
+2. **Team Member Scenarios**: Allow engineers and architects to submit hypothetical failure scenarios they believe could significantly disrupt the application
+3. **Resilience Modeling**: Perform component-based or systems-based resilience modeling to anticipate conditions leading to business losses
+
+**Hypothesis Template**:
+```
+Given: [Current system state and configuration]
+When: [Specific fault is injected]
+Then: [Expected system behavior and impact]
+Because: [Resilience mechanisms that should activate]
+```
+
+**Example Hypothesis**:
+```
+Given: The payments API is processing 500 TPS with 99.5% success rate
+When: We terminate 33% of EC2 instances behind the load balancer
+Then: Success rate remains above 99% and latency stays below 1000ms
+Because: Auto-scaling will launch replacement instances within 2 minutes,
+and the remaining instances have capacity to handle the increased load
+```
+
+### Step 6: Ensure Operational Readiness
+
+You need quantifiable indicators to measure impact, as described in the observability section. Being able to measure the application's behavior enables you to determine whether adverse conditions impacted the application and to what magnitude.
+
+The best way to understand impact is to measure steady state. Steady state measures what normal operation looks like and typically aligns with business and client experience indicators for a given application.
+
+Before moving to the next step, ensure you have:
+- **Observability in place**: Metrics, logs, and traces configured
+- **Baseline established**: Steady state documented and understood
+- **Rollback mechanisms ready**: Ability to stop experiment and restore normal operation
+- **Team availability**: Key personnel available during experiment
+- **Communication plan**: Stakeholders notified of upcoming experiment
+
+### Step 7: Run Controlled Experiments and Scenarios
+
+At AWS, we do not recommend conducting an initial chaos experiment on an application in production. The purpose of a chaos experiment is to learn something new about how the application behaves under stressful conditions. The application's behavior might be unpredictable during the experiment.
+
+<Callout type="warning">
+**Never conduct initial chaos experiments on production applications**. Performing an experiment for the first time in production could have customer-impacting consequences. Always run initial experiments in lower-level environments with minimal potential for affecting real-world users.
+</Callout>
+
+**Progressive Environment Strategy**:
+
+| Environment | Purpose | Characteristics |
+|-------------|---------|-----------------|
+| **Development** | Initial validation | Synthetic data, no real traffic, rapid iteration |
+| **Staging** | Integration testing | Production-like configuration, synthetic load |
+| **Pre-Production** | Final validation | Mirror production, canary traffic |
+| **Production** | Continuous validation | Real traffic, limited scope initially |
+
+Plan each experiment thoroughly using a document that captures key details:
+- Steady state definition
+- Hypothesis
+- Method of failure injection
+- Stop conditions
+- Rollback procedures
+- Communication plan
+- Success criteria
+
+**Execution Steps**:
+1. **Validate environment health**: Confirm all systems are operating normally
+2. **Establish steady state**: Generate baseline load and verify metrics
+3. **Inject fault**: Use AWS FIS or other tooling to introduce failure
+4. **Observe impact**: Monitor all metrics, logs, and traces
+5. **Verify recovery**: Confirm system returns to steady state after fault removal
+6. **Document findings**: Capture screenshots, metrics, and observations
+
+### Step 8: Learn and Fine-Tune
+
+After each experiment, gather as a team to review and reflect. Maintain a **blameless mindset**—focus on learning, not assigning blame.
+
+**Review Process**:
+
+1. **Review hypothesis**: Did the application behave as expected? Were there surprises?
+2. **Analyze data**: Review metrics, logs, screenshots collected during the experiment
+3. **Identify improvements**: Based on learnings, what can be improved in application design, documentation, monitoring, or other capabilities?
+4. **Create action items**: Capture follow-up projects to make the application more resilient
+5. **Share learnings**: Publish experiment results in a central location and advertise findings so others can learn
+
+**Blameless Post-Mortem Template**:
+```markdown
+# Chaos Experiment Review: [Experiment Name]
+
+## Hypothesis
+[What we expected to happen]
+
+## What Happened
+[What actually happened]
+
+## Surprises
+[Unexpected behaviors or outcomes]
+
+## Improvements Identified
+1. [Improvement in monitoring]
+2. [Improvement in resilience mechanisms]
+3. [Improvement in runbooks]
+
+## Action Items
+- [ ] [Specific action, owner, due date]
+- [ ] [Specific action, owner, due date]
+
+## Learnings to Share
+[Key takeaways for other teams]
+```
+
+Through this blameless approach, you can have candid conversations about what went wrong and how to fix it. Assume positive intent from everyone involved, and trust they were working toward good outcomes. Your shared goal is organizational growth and progression through continuous learning and adapting.
+
+## Organizational Resilience Sponsorship
+
+Chaos engineering provides the most value when applied across your organization. Work with an **executive sponsor** who can:
+- Set resilience goals across the organization
+- Remove fear, uncertainty, and doubt about chaos engineering
+- Make resilience everyone's responsibility
+- Prioritize remediation work over feature development when needed
+
+### Building the Business Case
+
+To support the business case for chaos engineering, attach efforts to critical business projects. Making resilience an asset and driver for acceleration helps track success over time.
+
+**Starting Metrics**:
+- Count of critical incidents per month or quarter
+- Average time to recover (MTTR)
+- Impact of incidents on customers and organization
+- Cost of downtime
+
+**Goal Setting**:
+Set goals with teams to reduce incident counts over 6-12 months as improvements are made across application stacks in response to chaos engineering experiments.
+
+### Measuring Success
+
+Track progress in chaos engineering over time by capturing these metrics:
+
+| Metric | Description | Expected Trend |
+|--------|-------------|----------------|
+| **Reduced Incident Rate** | Number of production incidents over time | Decreasing |
+| **Improved MTTR** | Average time to resolve incidents | Decreasing |
+| **Increased Availability** | Service-level metrics (e.g., 99.9% → 99.99%) | Increasing |
+| **Faster Time to Market** | Product release velocity | Increasing |
+| **Operational Cost Reduction** | Alert noise, manual effort, operational load | Decreasing |
+| **Boosted Confidence** | Survey results from engineers and SREs | Increasing |
+| **Improved Customer Experience** | Fewer service disruptions, rollbacks, outages | Improving |
+
+### Prioritizing Remediation
+
+As you perform chaos experiments, you'll identify areas for improvement where applications don't perform as intended. Remediation becomes work in your backlog that must be prioritized along with feature development.
+
+<Callout type="tip">
+**Make time for enhancements to avoid future failure**. Prioritize learnings and remediation based on impact level. Findings directly impacting resilience or security should have priority over new features to avoid customer impact.
+</Callout>
+
+If teams struggle to prioritize remediation over features, reach out to your executive sponsor to ensure priorities are set based on business risk tolerance.
+
+## Scaling Chaos Engineering Across Your Organization
+
+As your organization adopts chaos engineering, standardizing and implementing it will present challenges. In early maturity stages, different teams are likely to use different tooling and variations of the chaos engineering process. Some teams might not prioritize or adopt chaos engineering at all, despite potential benefits.
+
+### Establishing a Chaos Engineering Practice
+
+Build a **centralized center of excellence** or assemble a group of subject matter experts as part of your chaos engineering practice. As a small, centralized function, this team can work across software development, infrastructure, security, and business teams and maintain standards used by those teams.
+
+#### Role of the Centralized Practice Team
+
+The centralized practice team is responsible for developing and implementing chaos engineering practices across the organization.
+
+**Key Responsibilities**:
+
+1. **Enablement**: Act as facilitator to introduce chaos engineering through game days and workshops. Guide teams in designing and conducting experiments. Own training materials and upskill practicing teams.
+
+2. **Advisory**: Oversee experiments conducted by practicing teams. Ensure experiments deliver value and are conducted safely. Guide newcomers through execution and debrief.
+
+3. **Marketing and Value Tracking**: Communicate business value. Collect data from experiments across teams. Demonstrate ROI by quantifying incidents avoided, downtime prevented, and business impact of failures discovered in controlled conditions.
+
+4. **Standards**: Own and maintain the process for conducting chaos experiments, templates for planning and reporting, and tooling used to conduct experiments (like AWS FIS).
+
+**Standard Artifacts to Maintain**:
+- Experiment planning templates
+- Experiment report templates
+- Process documentation
+- Enablement materials
+- Best practice guidelines (guardrails, production readiness, evolution)
+- Communication and escalation procedures
+
+#### Role of the Practicing Teams
+
+The centralized team drives overall chaos engineering strategy, whereas practicing teams participate in the process and own the development and execution of experiments. This ensures experiments are relevant to each specific product or service, and learnings are actionable.
+
+The centralized practice team acts as mentor and owner of standards and process. However, to prevent becoming a bottleneck, individual practicing teams must learn from the central practice to perform chaos experiments themselves.
+
+### Establishing a Community of Practice
+
+In addition to creating a centralized team, establish an informal **community of practitioners** interested in chaos engineering. This community provides a platform for sharing knowledge, best practices, and experiences.
+
+**Community Functions**:
+- Broadcast updates from centralized team
+- Source learnings from practicing teams
+- Collect feedback on standards and process
+- Share experiment results and insights
+- Celebrate successes and learn from failures
+- Act as feedback loop to inform centralized team
+
+### Incorporating Chaos Engineering into Operational Resilience
+
+A chaos experiment is an investment by your business to prevent incidents in production. It's necessary to determine where the business can realize the greatest return on this investment.
+
+The organization can work with the centralized chaos engineering practice team to update its standards and determine which products are critical enough to require chaos experimentation.
+
+**Systems Development Process Integration**:
+
+Chaos engineering and chaos experiments should be performed repeatedly as part of an application's lifecycle. Similar to how teams regularly perform disaster recovery tests, they should conduct chaos experiments and game days continuously and periodically throughout the year.
+
+This approach improves how an organization:
+- **Anticipates** potential failures through hypothesis-driven testing
+- **Observes** system behavior under adverse conditions
+- **Responds** to incidents with practiced procedures and updated runbooks
+
+<KeyTakeaways>
+- **Chaos engineering is non-deterministic discovery**: Unlike deterministic resilience testing that validates known failure modes, chaos engineering uses hypothesis-based experiments to discover unknown weaknesses before they cause production outages
+- **Observability is the foundation**: Without comprehensive metrics (business, server-side, client experience, operations), logging, and request tracing, you cannot define steady state or create meaningful experiments to verify hypotheses
+- **Start small and build confidence progressively**: Begin chaos experiments in lower environments (development, staging, pre-production) and gradually advance to production only after building substantial confidence through systematic testing
+- **AWS FIS provides controlled experimentation**: Use stop conditions via CloudWatch alarms and safety levers to ensure experiments can be halted and rolled back if they exceed acceptable impact boundaries, preventing runaway failures
+- **Game days provide structured learning**: Chaos game days bring cross-functional teams together to practice incident response, validate resilience mechanisms, and identify gaps in processes and automation in a controlled setting
+- **Organizational support drives success**: Executive sponsorship, prioritization of remediation over features when findings are critical, and tracking business metrics like reduced incident rates demonstrate chaos engineering value and ensure sustainable practices
+- **Centralized practice with distributed execution**: A centralized center of excellence maintains standards, templates, and tooling while individual teams own and execute experiments relevant to their services
+- **Continuous practice prevents drift**: Schedule regular chaos experiments to verify that auto-healing mechanisms, runbooks, and resilience patterns haven't degraded over time as systems evolve
+</KeyTakeaways>

@@ -1,0 +1,620 @@
+## Introduction
+
+In distributed systems, hardware fails and software crashes. It's not a question of if, but when. At Amazon, services are designed to be horizontally scalable and redundant because every hard drive has a maximum expected lifetime, and every piece of software can crash. The challenge isn't just about servers shutting down when they fail—often, failing servers continue running in a degraded state, causing unpredictable and disproportionate harm to the overall system.
+
+**Health checks** are automated mechanisms that detect and respond to these failures before they cascade into larger outages. They continuously ask servers: "Are you capable of performing work successfully?" When implemented correctly, health checks minimize the impact of single-server failures by automatically removing unhealthy servers from service. However, poorly designed health checks can turn small problems into complete outages by taking down entire fleets when a shared dependency fails.
+
+This lesson explores how Amazon uses health checks to maintain service reliability, the tradeoffs between different health check implementations, and the critical balance between thorough detection and safe automation. We'll examine real-world examples of what happens when health checks work well—and when they don't—and provide practical guidance for implementing effective health checking in your own systems.
+
+> "The ideal health check will test every aspect of server and application health. However, trouble arises when the health check fails for a non-critical reason and when that failure is correlated across servers."
+
+## The Hidden Danger of Partial Failures
+
+The binary assumption that servers either work perfectly or shut down completely is dangerously misleading. In practice, servers often fail in subtle ways that make them appear functional while causing significant damage to overall system health.
+
+### The Blank Page Bug: A Cautionary Tale
+
+Consider a real example from Amazon's website rendering fleet: a bug caused certain web servers to render blank error pages on every request. The server didn't crash or shut down—it continued accepting traffic at high speed. This created three compounding problems:
+
+1. **Loss of self-awareness**: The server couldn't report its health to monitoring systems
+2. **No automatic removal**: Without health reporting, automation couldn't take it out of service
+3. **Traffic magnet**: Returning blank pages was faster than rendering real content, so the load balancer's "favor fast servers" algorithm sent disproportionate traffic to the broken servers
+
+This scenario illustrates why health checks are essential. Without them, a single unhealthy server in a fleet of ten could reduce overall availability to 90% or worse. The impact multiplies when load-balancing algorithms like **"least requests"** send more work to the fastest server—creating a "black hole" when that server fails requests quickly.
+
+<Callout type="warning">
+Failing servers often fail fast. A server returning errors immediately can become faster than healthy servers doing real work, attracting even more traffic and turning a small failure into a major incident.
+</Callout>
+
+### Why Servers Fail Independently
+
+Amazon has observed servers fail independently for numerous reasons:
+
+| Failure Type | Description | Impact |
+|--------------|-------------|--------|
+| **Disk failures** | Disks become unwritable | Requests fail immediately |
+| **Clock skew** | Abrupt time changes under load | Authentication failures |
+| **Credential issues** | Failed crypto material retrieval | Encryption/decryption breaks |
+| **Process crashes** | Critical support processes crash | Subtle functionality loss |
+| **Memory leaks** | Gradual memory exhaustion | Unpredictable behavior |
+| **Deadlocks** | Thread contention | Processing freezes completely |
+
+### The Black Hole Problem in Queue-Based Systems
+
+The black hole problem isn't limited to load-balanced services. Queue-based systems face similar challenges. When a queue poller server fails but continues polling messages as fast as possible, it becomes a black hole for work items. Unlike HTTP services where you might add latency matching to slow down failed requests, queue pollers pulling at maximum throughput create more complex protection challenges.
+
+<Mermaid title="Message Queue Black Hole: Failed Server Causing Tight Poll Loop" chart={`graph TD
+    A[Message Queue] --> B[Healthy Server 1]
+    A --> C[Healthy Server 2]
+    A --> D[Failed Server]
+    B --> E[Successful Processing]
+    C --> E
+    D --> F[Immediate Failures]
+    D --> G[High Poll Rate]
+    G --> A
+    style D fill:#ffcccc,color:#1a1a1a
+    style F fill:#ff6666,color:#fff`} />
+
+### Think About It
+
+*Imagine a microservice in your architecture that processes payment transactions. It has a local cache, connects to a payment gateway, and writes to a database. What types of independent failures could affect just one server in your fleet? How would you detect each type?*
+
+## Types of Health Checks
+
+Amazon employs multiple layers of health checks, each with different strengths and tradeoffs. Understanding these types helps teams balance thorough detection against the risk of false positives.
+
+### Liveness Checks
+
+**Liveness checks** test basic connectivity and the presence of a server process. They're typically performed by load balancers or external monitoring agents without understanding application-specific details.
+
+#### Common Liveness Check Implementations
+
+1. **TCP Connection Test**: Confirming a server is listening on its expected port and accepting TCP connections
+2. **Basic HTTP Request**: Performing HTTP GET and verifying a 200 status code response
+3. **AWS EC2 Status Checks**: Testing network reachability and basic instance health
+
+These checks are lightweight and come "for free" with services like Elastic Load Balancing, requiring no application-specific implementation.
+
+**Advantages:**
+- Zero implementation effort for application developers
+- Extremely fast execution (milliseconds)
+- No false positives from application-level issues
+- Included automatically with AWS infrastructure services
+
+**Limitations:**
+- Cannot detect application-level failures
+- Miss bugs in business logic
+- Don't verify correctness of responses
+- Won't catch performance degradation
+
+### Local Health Checks
+
+**Local health checks** verify that the application can likely function by testing resources that aren't shared with peer servers. Because these resources are local, failures are unlikely to affect multiple servers simultaneously, making these checks safe for automated responses.
+
+#### Disk Health Verification
+
+Even "stateless" services typically need writable disks for monitoring, logging, and metering data. A local health check should attempt to write a small test file and read it back.
+
+```python
+def check_disk_health():
+    """Local health check: Verify disk is readable and writable"""
+    test_file = "/var/app/health_check_test"
+    test_content = f"health_check_{time.time()}"
+
+    try:
+        # Write test content
+        with open(test_file, 'w') as f:
+            f.write(test_content)
+
+        # Read back and verify
+        with open(test_file, 'r') as f:
+            content = f.read()
+
+        if content != test_content:
+            return False, "Disk read/write verification failed"
+
+        # Clean up
+        os.remove(test_file)
+        return True, "Disk healthy"
+
+    except Exception as e:
+        return False, f"Disk check failed: {str(e)}"
+```
+
+#### Critical Process Health
+
+Services using on-server proxies (like NGINX) should verify both the proxy and the application process are running and responding correctly. A liveness check might only test the proxy; a local health check passes through to the application.
+
+```javascript
+// Express.js local health check endpoint
+app.get('/health/deep', async (req, res) => {
+    const checks = {
+        webServer: true,  // If we're here, web server is running
+        appProcess: await checkApplicationProcess(),
+        supportDaemons: await checkSupportDaemons()
+    };
+
+    const allHealthy = Object.values(checks).every(v => v === true);
+
+    if (allHealthy) {
+        res.status(200).json({ status: 'healthy', checks });
+    } else {
+        res.status(503).json({ status: 'unhealthy', checks });
+    }
+});
+
+async function checkApplicationProcess() {
+    try {
+        // Verify core app logic responds correctly
+        const result = await appCore.healthCheck();
+        return result.status === 'ok';
+    } catch (error) {
+        console.error('App process check failed:', error);
+        return false;
+    }
+}
+```
+
+#### Support Process Verification
+
+Monitoring daemons, credential update services, and metering agents must be running to maintain visibility and functionality. Missing support processes put functionality at risk in subtle, difficult-to-detect ways.
+
+<Callout type="info">
+The website rendering bug mentioned earlier would have been caught by a slightly deeper local health check—one that verified not just that the rendering process was running, but that it was responding with actual content rather than blank pages.
+</Callout>
+
+### Think About It
+
+*Your service has five support processes: a monitoring daemon, a log shipper, a credential rotation service, a metrics publisher, and a configuration updater. If one fails, which should fail the health check immediately? Which should you tolerate for some period? How would you make this decision?*
+
+### Dependency Health Checks
+
+**Dependency health checks** thoroughly inspect the ability to interact with adjacent systems like databases, caches, and other services. While comprehensive, these checks are risky because dependency failures can affect all servers simultaneously, causing **correlated failures** across the fleet.
+
+#### Configuration Freshness
+
+Servers that asynchronously look for configuration or metadata updates can become significantly out of sync if the update mechanism breaks. However, when a server doesn't see updates for a while, it cannot distinguish between a broken update mechanism and a period where no updates were published.
+
+```python
+def check_configuration_freshness(max_age_seconds=300):
+    """Check if configuration was updated recently enough"""
+    config_timestamp = get_last_config_update_time()
+    current_time = time.time()
+    age = current_time - config_timestamp
+
+    if age > max_age_seconds:
+        # Is this our problem or the central system's?
+        # We can't tell definitively!
+        return False, f"Config age {age}s exceeds threshold {max_age_seconds}s"
+
+    return True, f"Config fresh (age: {age}s)"
+```
+
+#### Network Connectivity
+
+Strange network behavior can affect a subset of servers' ability to communicate with dependencies without affecting inbound traffic routing. Software issues like deadlocks or connection pool bugs can also hinder network communication.
+
+#### Credential Validity
+
+Expired credentials are a local problem that should be caught, but testing this requires actually calling the dependency, which introduces the risk of false positives.
+
+The fundamental challenge: dependency health checks can create **false positives** when the dependency itself has problems, potentially taking down a healthy service along with an unhealthy dependency.
+
+### Dependency Health Check Comparison
+
+| Aspect | Local Health Check | Dependency Health Check |
+|--------|-------------------|------------------------|
+| **Failure Correlation** | Independent failures | Correlated across fleet |
+| **Safe for Automation** | Yes | Requires caution |
+| **Detection Scope** | Local issues only | Includes connectivity issues |
+| **False Positive Risk** | Low | High during dependency issues |
+| **Response Speed** | Fast (milliseconds) | Slower (network calls) |
+| **Recommended Action** | Automatic removal | Central evaluation |
+
+### Anomaly Detection
+
+**Anomaly detection** looks across all servers in a fleet to identify outliers behaving differently from their peers. This approach catches failures that individual servers can't detect about themselves.
+
+#### Clock Skew Detection
+
+Servers under high load can experience abrupt clock drift. Security measures like AWS signed requests require client clocks within five minutes of actual time. Clock skew causes authentication failures without servers realizing their clocks are wrong.
+
+#### Outdated Code Detection
+
+Zombie servers that disconnect from the network and later return may run dangerously outdated code incompatible with the current fleet. They might use incompatible database schemas or wrong configurations.
+
+#### Unanticipated Failure Modes
+
+Sometimes servers fail in unexpected ways:
+- Returning HTTP 400 (client error) instead of 500 (server error)
+- Slowing down instead of failing outright
+- Responding faster than peers (indicating false/empty responses)
+
+Anomaly detection serves as an incredible catchall for failure modes no one anticipated.
+
+<Mermaid title="Anomaly Detection Flow for Fleet Health Monitoring" chart={`graph TD
+    A[Collect Fleet Metrics] --> B[Statistical Analysis]
+    B --> C{Outlier Detected?}
+    C -->|No| D[Continue Monitoring]
+    C -->|Yes| E[Classify Anomaly Type]
+    E --> F{Anomaly Severity}
+    F -->|High| G[Automatic Removal]
+    F -->|Medium| H[Alert + Monitor]
+    F -->|Low| I[Log for Analysis]
+    G --> J[Operator Notification]
+    H --> J
+    D --> A`} />
+
+#### Requirements for Effective Anomaly Detection
+
+1. **Servers must do similar work**: Load-balanced fleets naturally meet this criterion. Services routing different traffic types to different servers may not behave similarly enough.
+
+2. **Fleets should be homogeneous**: Mixed instance types require grouping metrics by instance type. Larger instances naturally handle more load; smaller instances might falsely appear slow.
+
+3. **Errors must be reported**: Client instrumentation and load balancer access logs provide critical data when server monitoring fails. Application Load Balancer access logs show which backend server was contacted for each request, response time, and success/failure status.
+
+### Combining Health Check Types
+
+Amazon typically implements multiple health check types simultaneously, layering them for comprehensive coverage:
+
+```
+Layer 1: Liveness Check (Load Balancer)
+   ↓ (Remove from rotation if fails)
+Layer 2: Local Health Check (Application)
+   ↓ (Remove from rotation if fails)
+Layer 3: Dependency Health Check (External Monitor)
+   ↓ (Alert + evaluate fleet-wide)
+Layer 4: Anomaly Detection (Centralized System)
+   ↓ (Remove outliers after analysis)
+```
+
+**Try it yourself:** Experiment with the interactive simulation below to see how health check metrics appear on operational dashboards.
+
+<MetricsDashboard />
+
+## Reacting Safely to Health Check Failures
+
+When a server determines it is unhealthy, the response strategy determines whether you prevent an outage or cause one. The critical distinction is between **local decisions** (server takes itself out of service) and **central decisions** (centralized system evaluates fleet-wide context before acting).
+
+### The Fail-Open Pattern
+
+**Fail-open** behavior provides a crucial safety mechanism: when an individual server fails its health check, the load balancer stops sending it traffic. But when *all* servers fail simultaneously, the load balancer assumes the health check itself is broken and continues sending traffic to all servers.
+
+This pattern enables safe implementation of deeper dependency health checks. For example, a health check that queries a database and verifies support processes can be safely automated because:
+
+- Single-server failures (like local disk issues) are correctly handled
+- Shared dependency failures (like database slowdowns) trigger fail-open behavior instead of taking down the entire service
+
+#### AWS Services Supporting Fail-Open
+
+**Network Load Balancer**: Fails open if no servers report healthy. Also fails out of unhealthy Availability Zones if all servers in an AZ report unhealthy.
+
+**Application Load Balancer**: Supports fail-open behavior when all targets are unhealthy.
+
+**Route 53**: Health checks fail open, creating multiple layers of protection against correlated failures.
+
+<Callout type="warning">
+While fail-open is helpful, Amazon teams remain cautious about health checks that can act on large numbers of servers quickly. Not all failure scenarios can be fully reasoned about or tested in advance.
+</Callout>
+
+#### Testing Fail-Open Behavior
+
+When relying on fail-open, teams must test failure modes thoroughly. Consider a service where servers connect to a shared data store. If the store becomes slow or responds with low error rates, servers might occasionally fail dependency health checks. This causes servers to flap in and out of service without triggering the fail-open threshold—potentially worse than no health check at all.
+
+### Think About It
+
+*Your service has 10 servers behind an ALB. The shared Redis cache becomes slow, causing health checks to occasionally fail (each server fails about 30% of health checks, but at different times). How does this differ from the cache being completely down? What threshold would trigger fail-open? Is flapping better or worse than complete failure?*
+
+### Health Checks Without Circuit Breakers
+
+When fail-open behavior isn't available or fully trusted, Amazon follows this conservative approach:
+
+1. **Configure work producers** (load balancers, queue pollers) to perform only liveness and local health checks
+2. **Use external monitoring systems** for dependency health checks and anomaly detection
+3. **Build careful automation** with rate limiting and thresholding to prevent drastic fleet-wide actions
+
+This separation ensures that only definitively local failures trigger automatic removal from service.
+
+#### External Monitoring Best Practices
+
+When building systems to react automatically to dependency health check failures, teams must implement careful thresholding. Amazon teams operating stateful servers like DynamoDB, S3, and RDS have critical durability requirements. They've built:
+
+- **Rate limiting**: Maximum servers that can be replaced per time period
+- **Control feedback loops**: Automation stops and engages humans when thresholds are crossed
+- **Active probing**: External systems reach out to servers to check health, compensating for servers too broken to self-report
+
+### Prioritizing Health Checks During Overload
+
+During traffic surges, servers must prioritize responding to health checks over regular work. Failing to do so can trigger a devastating **downward spiral**.
+
+#### The Overload Spiral
+
+1. Traffic surge causes server overload
+2. Server becomes slow to respond to ALL requests, including health checks
+3. Load balancer times out the health check and removes server from rotation
+4. Remaining servers receive redistributed traffic, becoming overloaded themselves
+5. More servers fail health checks, further shrinking the fleet
+6. Complete service outage
+
+<Mermaid title="Overload Spiral: Health Checks Causing Cascading Failures" chart={`graph LR
+    A[1000 req/s<br/>across 10 servers] --> C[Server 1<br/>overloaded]
+    C --> D[Fails<br/>health check]
+    D --> E[9 servers<br/>@ 111 req/s]
+    E --> F[Servers 2-3<br/>overloaded]
+    F --> G[Fail<br/>health checks]
+    G --> H[7 servers<br/>@ 143 req/s]
+    H --> J[Complete<br/>outage]
+    style C fill:#fff3cd,color:#1a1a1a
+    style F fill:#ffbb88,color:#fff
+    style H fill:#ff6644,color:#fff
+    style J fill:#ff0000,color:#fff`} />
+
+#### Prevention Strategies
+
+**Connection Limits**: Tools like iptables and load balancers limit connections to prevent flooding.
+
+```bash
+# Using iptables to limit connections
+iptables -A INPUT -p tcp --dport 8080 -m connlimit \
+  --connlimit-above 100 --connlimit-mask 0 -j REJECT
+```
+
+**Extra Worker Threads**: Configure worker pools larger than max connections to reserve capacity for health checks.
+
+```yaml
+# Example configuration
+proxy_max_connections: 100
+http_server_worker_threads: 150  # NOT 100!
+# Reserve 50 threads for health checks and overhead
+```
+
+**Server-Side Request Throttling**: Implement maximum concurrent requests enforcement where health checks are always allowed but normal requests are rejected at threshold.
+
+**Background Health Check Threads**: Run dependency checks asynchronously and cache results for fast responses.
+
+```python
+import threading
+import time
+
+class BackgroundHealthChecker:
+    def __init__(self, check_interval=5):
+        self.is_healthy = True
+        self.last_check_time = time.time()
+        self.check_interval = check_interval
+        self.lock = threading.Lock()
+
+        # Start background thread
+        self.thread = threading.Thread(target=self._health_check_loop, daemon=True)
+        self.thread.start()
+
+    def _health_check_loop(self):
+        """Run in background thread"""
+        while True:
+            try:
+                # Perform expensive dependency checks
+                db_healthy = check_database_connection()
+                cache_healthy = check_cache_connection()
+
+                with self.lock:
+                    self.is_healthy = db_healthy and cache_healthy
+                    self.last_check_time = time.time()
+
+            except Exception as e:
+                print(f"Health check exception: {e}")
+                with self.lock:
+                    self.is_healthy = False
+
+            time.sleep(self.check_interval)
+
+    def get_health_status(self):
+        """Called by health check endpoint - returns immediately"""
+        with self.lock:
+            age = time.time() - self.last_check_time
+            if age > self.check_interval * 3:
+                # Health check thread might have died!
+                return False, "Health check thread not responding"
+            return self.is_healthy, "OK"
+```
+
+<Callout type="tip">
+When implementing background health check threads, be extra cautious about detecting if the thread exits. If the background thread crashes, the server won't detect future failures—or recoveries!
+</Callout>
+
+## Balancing Dependencies and Scope of Impact
+
+Amazon's service-oriented architecture provides valuable insights for health check design. Each service is designed to do a small number of things, limiting scope of impact when problems occur.
+
+### Hard vs. Soft Dependencies
+
+A **soft dependency** is one the service only needs sometimes—it can still perform some work even if the dependency is unavailable. Without fail-open protection, implementing a health check that tests a soft dependency turns it into a **hard dependency**.
+
+#### Example: Analytics Service as Soft Dependency
+
+```python
+def process_order(order):
+    # Core functionality
+    payment_result = process_payment(order)
+    inventory_result = update_inventory(order)
+
+    # Soft dependency - nice to have, not critical
+    try:
+        analytics_service.record_order(order)
+    except AnalyticsServiceException:
+        # Log but don't fail the order
+        log.warning("Analytics service unavailable")
+
+    return payment_result and inventory_result
+```
+
+If you add a health check that tests the analytics service, you turn it into a hard dependency—when analytics has problems, order processing goes down too!
+
+### API-Level Granularity
+
+Even within a single service, different APIs may have different dependencies.
+
+**Control plane APIs**: Occasionally-called CRUD operations on long-living resources
+
+**Data plane APIs**: High-throughput, business-critical APIs that should continue operating even if control plane dependencies fail
+
+<Mermaid title="Health Check Granularity: Data Plane vs Control Plane APIs" chart={`graph TD
+    A[Service] --> B[Control Plane APIs]
+    A --> C[Data Plane APIs]
+    B --> D[Config Store]
+    B --> E[Metadata DB]
+    C --> F[Data Store]
+    C --> G[Cache]
+    H[Health Check] --> C
+    H -.Don't Check.-> B
+    style C fill:#d4edda,color:#1a1a1a
+    style B fill:#fff3cd,color:#1a1a1a
+    style H fill:#cce5ff,color:#1a1a1a`} />
+
+### Think About It
+
+*You're designing a file storage service with APIs to create/delete buckets (control plane) and APIs to upload/download files (data plane). The metadata database tracking bucket configurations goes down. Should your health check fail? What about file uploads to existing buckets?*
+
+## Real-World Health Check Problems
+
+### Deployment Failures
+
+Deployment systems push new code to fleet subsets, waiting for each wave to complete. Without dependency health checks in deployment validation, bad code can march through the fleet.
+
+**Mitigations:**
+- Fleet-wide alarms triggering on size, load, latency, or error rate
+- Phased deployments deploying one AZ at a time with integration tests
+- Pre-production testing environments
+
+<Callout type="info">
+**CloudWatch Database Insights (2025)** now provides cross-account and cross-region database monitoring for Amazon RDS, Aurora, and DynamoDB. This enhanced visibility helps implement the health check patterns discussed in this lesson by providing unified monitoring of database dependencies across your entire infrastructure, making it easier to distinguish between database-level issues and application-level health problems.
+</Callout>
+
+### Asynchronous Processor Issues
+
+Queue workers without deep health checks can have disk failures or resource exhaustion. They continue pulling work but fail to process messages.
+
+**Mitigations:**
+- SQS visibility timeouts causing message redelivery
+- Error rate alarms alerting operators
+- Active external health monitoring
+
+### Disk Filling Issues
+
+Full disks cause both processing and logging failures, creating monitoring gaps.
+
+**Mitigations:**
+- Proxy-sourced metrics from ALB or API Gateway
+- Service-emitted metrics from SQS
+- Multiple monitoring layers
+
+### Zombie Servers
+
+Servers disconnecting and later returning can run outdated code or wrong configurations.
+
+**Mitigation:**
+- Version reporting in health checks with central monitoring comparison
+
+## Implementing Health Checks: Practical Guide
+
+### Multi-Layer Health Check Implementation
+
+```python
+from flask import Flask, jsonify
+from enum import Enum
+import time
+
+app = Flask(__name__)
+
+class HealthStatus(Enum):
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    UNHEALTHY = "unhealthy"
+
+class HealthChecker:
+    def __init__(self):
+        self.startup_time = time.time()
+
+    def liveness_check(self):
+        """Layer 1: Basic liveness"""
+        return {
+            "status": HealthStatus.HEALTHY.value,
+            "uptime": time.time() - self.startup_time
+        }
+
+    def local_check(self):
+        """Layer 2: Local resources"""
+        checks = {}
+        overall_status = HealthStatus.HEALTHY
+
+        disk_ok, disk_msg = check_disk_writable()
+        checks["disk"] = {"healthy": disk_ok, "message": disk_msg}
+        if not disk_ok:
+            overall_status = HealthStatus.UNHEALTHY
+
+        process_ok, process_msg = check_critical_processes()
+        checks["processes"] = {"healthy": process_ok, "message": process_msg}
+        if not process_ok:
+            overall_status = HealthStatus.UNHEALTHY
+
+        return {
+            "status": overall_status.value,
+            "checks": checks
+        }
+
+# Health check endpoints
+health_checker = HealthChecker()
+
+@app.route('/health/liveness')
+def liveness():
+    """For load balancer basic health checks"""
+    result = health_checker.liveness_check()
+    return jsonify(result), 200
+
+@app.route('/health/local')
+def local():
+    """For load balancer - safe for automatic removal"""
+    result = health_checker.local_check()
+    status_code = 200 if result["status"] == HealthStatus.HEALTHY.value else 503
+    return jsonify(result), status_code
+```
+
+### Design Checklist
+
+**Liveness Checks:**
+- [ ] Load balancer configured to ping HTTP endpoint
+- [ ] Response time < 1 second
+- [ ] Basic connectivity test passes if server running
+
+**Local Health Checks:**
+- [ ] Disk read/write verification
+- [ ] Critical process verification
+- [ ] Support daemon verification
+- [ ] No shared dependencies tested
+- [ ] Safe for automatic removal
+
+**Dependency Health Checks:**
+- [ ] Test with timeouts to avoid hanging
+- [ ] Used only with fail-open OR central monitoring
+- [ ] Not used for automatic removal without circuit breaker
+- [ ] Soft vs. hard dependency implications considered
+
+**Overload Protection:**
+- [ ] Health check endpoints prioritized
+- [ ] Extra worker threads reserved
+- [ ] Connection limits configured
+- [ ] Background health check thread if expensive
+
+**Testing:**
+- [ ] Single server failure tested
+- [ ] Fleet-wide dependency failure tested
+- [ ] Partial failure tested
+- [ ] Overload behavior tested
+- [ ] Fail-open behavior verified
+
+<KeyTakeaways>
+- **Deep health checks prevent black holes**: Without health checks, failing servers can attract disproportionate traffic by appearing "fast" when they're just failing immediately
+- **Layer health checks by risk**: Use liveness and local checks for fast automated responses; reserve dependency checks for careful automation with central oversight or fail-open circuit breakers
+- **Fail-open prevents cascades**: When all servers fail health checks simultaneously, continue serving traffic—the health check or shared dependency is likely the problem
+- **Prioritize health checks during overload**: Reserve worker threads, use connection limits, and implement background health check threads to ensure servers respond quickly even under load
+- **Minimize scope of impact**: Avoid turning soft dependencies into hard dependencies—consider which APIs truly need each dependency
+- **Test thoroughly**: The most dangerous scenarios involve partial failures and dependency degradation—test these explicitly rather than assuming automated systems will behave correctly
+</KeyTakeaways>

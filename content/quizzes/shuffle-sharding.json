@@ -1,0 +1,60 @@
+{
+  "lessonSlug": "shuffle-sharding",
+  "questions": [
+    {
+      "question": "Your service has 12 workers and assigns each customer to a shuffle shard of 3 workers. Approximately how many unique shuffle shards are possible?",
+      "options": [
+        "36 (12 × 3)",
+        "4 (12 ÷ 3)",
+        "220 (calculated as 12 choose 3)",
+        "1,728 (12³)"
+      ],
+      "correctIndex": 2,
+      "explanation": "The number of shuffle shards is calculated using the combination formula 'n choose k': 12! / (3! × 9!) = 220. This means you can assign up to 220 customers to completely unique shuffle shards with no overlap. This is dramatically better than traditional sharding, which would divide 12 workers into 4 shards of 3 workers each, giving only 4 groups and 25% scope of impact instead of ~0.45%."
+    },
+    {
+      "question": "Customer A is assigned to workers [2, 5, 8] and Customer B is assigned to workers [2, 5, 9]. Customer A experiences a problem that crashes workers 2, 5, and 8. What happens to Customer B's service?",
+      "options": [
+        "Customer B is completely unaffected since they don't share any workers with Customer A",
+        "Customer B experiences 67% degradation (2 of 3 workers failed) but can still operate on worker 9",
+        "Customer B is completely impacted because workers 2 and 5 failed",
+        "The system automatically reassigns Customer B to different workers"
+      ],
+      "correctIndex": 1,
+      "explanation": "Customer B shares workers 2 and 5 with Customer A but has worker 9 available. If workers 2 and 5 crash due to Customer A's problem, Customer B loses 2 of their 3 workers but can still get service from worker 9. If the client is fault-tolerant with retries, service continues with degraded capacity. This demonstrates shuffle sharding's power—problems propagate partially rather than completely, and most customers share no or minimal workers with affected customers."
+    },
+    {
+      "question": "Your API service has 1,000 customers and 100 workers. Using traditional sharding with 20 shards of 5 workers each versus shuffle sharding with shards of 4 workers, approximately how much better is shuffle sharding's scope of impact?",
+      "options": [
+        "About 2x better (5% vs 2.5%)",
+        "About 5x better (5% vs 1%)",
+        "Dramatically better—approximately 125x (5% vs 0.04%)",
+        "About the same—both provide similar isolation"
+      ],
+      "correctIndex": 2,
+      "explanation": "Traditional sharding: 20 shards means 5% scope of impact per shard (1/20). Shuffle sharding with 100 workers and shards of 4: approximately 3,921,225 possible combinations. With proper assignment, each customer gets a unique shard, so scope of impact ≈ shard size / total workers = 4/100 = 4% IF workers fail completely. But more accurately, impact to other customers depends on specific overlap—with good assignment, less than 0.04%. The exponential growth of combinations makes shuffle sharding dramatically superior at scale."
+    },
+    {
+      "question": "Why does Amazon Route 53 use 2,048 virtual name servers with shuffle shards of 4, rather than physical servers mapped 1-to-1 with virtual servers?",
+      "options": [
+        "Virtual servers are cheaper to operate than physical servers",
+        "Virtual servers can be moved between physical servers to manage capacity and respond to failures without changing customer assignments",
+        "DNS protocol requirements mandate at least 2,048 name servers",
+        "Virtual servers provide better performance than physical servers"
+      ],
+      "correctIndex": 1,
+      "explanation": "Virtual name servers are a layer of abstraction over physical infrastructure. Route 53 can move virtual servers between physical machines to balance load, manage capacity, perform maintenance, or respond to hardware failures—all without changing customer domain assignments. Customers are assigned to virtual servers (which persist), while the mapping of virtual to physical servers can be adjusted operationally. This provides flexibility while maintaining shuffle sharding's isolation benefits."
+    },
+    {
+      "question": "You're implementing shuffle sharding for a multi-tenant SaaS platform with organizations and users within organizations. What would 'recursive shuffle sharding' provide?",
+      "options": [
+        "Each organization gets shuffle sharded to workers, providing organization-level isolation",
+        "Users within each organization are also shuffle sharded, providing both organization-level and user-level isolation boundaries",
+        "The shuffle shard assignments are recalculated recursively until optimal distribution is found",
+        "Shuffle sharding runs recursively in a loop to continuously optimize assignments"
+      ],
+      "correctIndex": 1,
+      "explanation": "Recursive shuffle sharding applies the pattern at multiple nested levels. Organizations are shuffle sharded to sets of workers (organization-level isolation), and within each organization, individual users are shuffle sharded to subsets of that organization's workers (user-level isolation). This creates nested isolation boundaries: a problem with one user affects only their shard, isolated from other users in the same organization; a problem with one organization affects only that organization's resources, not other organizations. Each layer provides additional blast radius reduction."
+    }
+  ]
+}

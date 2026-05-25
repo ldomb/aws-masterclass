@@ -1,0 +1,362 @@
+## Introduction
+
+When designing resilient systems, engineers naturally look to the real world for patterns and inspiration. Consider an airport where display boards fail—a contingency plan must exist. Perhaps humans writing flight information on whiteboards positioned throughout the terminal. Passengers can still find their gates eventually, so the fallback strategy appears successful.
+
+But look closer at the whiteboard fallback. It's riddled with problems: the information is difficult to read from a distance, nearly impossible to keep current as flights change gates or get delayed, and highly vulnerable to human error (wrong gate numbers, missing flights, illegible handwriting). The whiteboard strategy is necessary in the physical world where alternatives don't exist, but it's deeply flawed. Staff know this—the whiteboards are a last resort, and everyone hopes the display boards come back online quickly.
+
+In distributed systems, fallback strategies—switching to an alternative mechanism when the primary fails—are among the most difficult challenges to handle correctly, especially for time-sensitive services. Bad fallback strategies can lurk dormant for months or even years before triggering catastrophic failures. The difference between a good strategy and a bad strategy is subtle, and testing fallback behavior is extraordinarily difficult.
+
+At Amazon, we've learned a counterintuitive but critical lesson through hard experience: **we almost never use fallback in distributed systems**. This isn't because Amazon engineers are risk-averse or because the systems are so reliable they never fail. It's because fallback strategies in distributed systems have repeatedly proven to be more dangerous than the failures they're meant to address.
+
+This lesson explores why fallback strategies are so treacherous in distributed systems, examines real-world Amazon outages caused by fallback mechanisms that seemed reasonable at design time, and teaches the alternative patterns Amazon now uses to build truly resilient services without relying on fallback.
+
+## Understanding Critical Failures and Response Strategies
+
+Critical failures prevent a service from producing useful results. In an e-commerce website, if a database query for product information fails, the website cannot display the product page successfully. Amazon services must handle the vast majority of critical failures to be reliable.
+
+There are four broad categories of strategies for handling critical failures:
+
+**Retry**: Perform the failed activity again, either immediately or after some delay. This works well for transient errors like brief network glitches or temporary resource exhaustion.
+
+**Proactive retry** (also called hedging): Perform the activity multiple times in parallel and use the first response that comes back. This masks latency variance and transient failures at the cost of additional resources.
+
+**Failover**: Perform the activity again against a different copy of the endpoint, or preferably, perform multiple parallel copies of the activity to raise the odds of at least one succeeding. This handles failures of specific instances or availability zones.
+
+**Fallback**: Use a different mechanism to achieve the same result. This is the focus of this lesson and the strategy Amazon has learned to avoid.
+
+Fallback seems intuitive and appears throughout engineering practice. When the primary mechanism fails, switch to an alternative. But in distributed systems, this intuition betrays us in ways that are difficult to anticipate and even harder to test.
+
+## Single-Machine Fallback: The malloc Example
+
+Before diving into distributed fallback, let's understand the challenges of fallback in single-machine applications. Consider this common C pattern for handling memory allocation failures:
+
+```c
+pixel_ranges = malloc(image_size);
+if (pixel_ranges == NULL) {
+    // On error, malloc returns NULL
+    exit(1);  // Just give up
+}
+```
+
+Most applications ignore malloc failures entirely. The reasoning is sound: on a single machine, if malloc fails, the machine is probably out of memory or dangerously low on memory. There are bigger problems coming—the entire machine might crash soon. In this context, failing fast is reasonable. The application shares fate with the machine.
+
+But what if we wanted to handle this gracefully? We might implement a fallback mechanism with an alternative memory allocation function:
+
+```c
+pixel_ranges = malloc(image_size);
+if (pixel_ranges == NULL) {
+    pixel_ranges = malloc2(image_size);  // Fallback to alternative allocator
+}
+```
+
+At first glance, this looks reasonable. We've added resilience by providing an alternative. But this code has serious, subtle problems that illustrate why fallback is so challenging.
+
+### Testing Fallback is Extremely Difficult
+
+Fallback logic is extraordinarily hard to test properly. We could intercept the call to malloc and inject failures artificially, but that doesn't accurately simulate what actually happens in production environments.
+
+In production, malloc failures mean the machine is genuinely low on memory or out of memory. The entire system is under memory pressure. How do you accurately simulate this broader memory pressure in a test environment? Even if you could generate a low-memory environment (perhaps in a Docker container with strict memory limits), how would you time the low-memory condition to coincide precisely with the execution of the malloc2 fallback code?
+
+The answer is: it's extremely difficult, time-consuming, and the tests rarely reflect actual production conditions. This means fallback code is often **poorly tested or untested**, despite being critical for system reliability.
+
+### Fallbacks Can Also Fail
+
+The fallback code shown above doesn't handle malloc2 failures. What happens if malloc2 also returns NULL? The program will likely crash when it tries to use a NULL pointer. So the program doesn't provide nearly as much benefit as intended—it might slightly reduce the likelihood of complete failure, but it doesn't eliminate it.
+
+More importantly, at Amazon we've found that **spending engineering resources on making the primary (non-fallback) code more reliable** usually raises success odds more dramatically than investing in infrequently used, hard-to-test fallback strategies.
+
+### Side Effects Often Make Things Worse
+
+Here's a critical question: If malloc2 has higher success odds, why use malloc at all? Why not use malloc2 for everything?
+
+The answer reveals the fundamental problem with fallback. Logically, malloc2 must be making trade-offs in exchange for its higher availability. Perhaps it allocates memory in higher-latency SSD-based storage instead of RAM. Maybe it uses a more expensive algorithm that's slower but works under memory pressure.
+
+Consider what actually happens when malloc fails and malloc2 kicks in:
+
+1. Customer is using the application normally
+2. malloc fails, triggering the fallback
+3. malloc2 succeeds, but the application suddenly slows down (bad: is slower acceptable during a failure?)
+4. The machine is likely out of or very low on memory (already a problem)
+5. Customer now experiences **two problems simultaneously**: slower application AND slower machine
+
+The side effects of switching to malloc2 might make the overall problem worse rather than better. Other subsystems might also be contending for the same SSD-based storage that malloc2 uses, creating resource contention and cascading slowdowns throughout the system.
+
+<Callout type="warning">
+**Unpredictable Load from Fallback**: Fallback logic places unpredictable load on systems. Even simple actions like writing error messages with stack traces are harmless at low rates, but if something suddenly causes high error rates, a CPU-bound application can morph into an I/O-bound application. If the disk wasn't provisioned to handle writing at that rate or storing that amount of data, it can slow down or crash the application.
+</Callout>
+
+### Latent Bugs: Failure Delayed is Failure Amplified
+
+Not only might the fallback strategy make the problem worse, this will likely occur as a **latent bug**—a bug that doesn't manifest for an extended period.
+
+It's easy to develop fallback strategies that rarely or never trigger in production. It might take months or even years before even one customer's machine runs out of memory at precisely the right moment to trigger the specific line of code with the malloc2 fallback. If there's a bug in the fallback logic or some kind of side effect that amplifies the problem, the engineers who wrote the code will likely have forgotten how it worked. The code will be harder to understand and fix because nobody has looked at it in months or years.
+
+For a single-machine application, this may be an acceptable business trade-off. But in distributed systems, the consequences are far more severe.
+
+### Solutions for Single-Machine Applications
+
+For non-critical single-machine applications: **Let memory allocation errors crash the application**. The code shares fate with the machine, which is probably about to fail anyway. Failing fast is a good strategy. The business trade-off is reasonable.
+
+For critical single-machine applications that must work despite memory allocation failures: **Pre-allocate all heap memory on startup** and never rely on malloc again, even under error conditions. Amazon has implemented this strategy multiple times, for example in monitoring daemons that run on production servers and Amazon EC2 daemons that monitor customers' CPU bursts.
+
+## Distributed Fallback: All Problems Amplified
+
+At Amazon, distributed systems—especially real-time systems that must respond quickly—cannot make the same trade-offs as single-machine applications. The fundamental differences create an environment where fallback is far more dangerous.
+
+### Lack of Shared Fate
+
+Services don't run on the customer's machine. When a single-machine application runs out of memory, the customer's machine is failing, and the customer probably doesn't expect the application to keep running. There's shared fate.
+
+But services are different. Customers typically use services precisely because they're expected to be more available than single-machine applications running on one server. Customers have different expectations. We need to make services highly available, and that creates pressure to implement fallback strategies.
+
+Unfortunately, distributed fallback has all the same problems as single-machine fallback, but amplified dramatically:
+
+**1. Harder to Test**: Multiple machines and downstream services play roles in failures. The failure modes themselves, such as overload scenarios, are hard to replicate even if test orchestration across multiple machines is available. The combinatorics increase the sheer number of cases to test exponentially, so you need exponentially more tests that are dramatically harder to set up.
+
+**2. Fallbacks Can Fail**: While it might seem that fallback strategies guarantee success, in Amazon's experience, they usually only improve the odds of success. They don't guarantee it.
+
+**3. Often Make Outages Worse**: In Amazon's experience, fallback strategies frequently increase the scope of impact of failures as well as increasing recovery times. A partial outage becomes a full outage. A single service failure cascades to multiple services.
+
+**4. Trade-offs Are Real**: As with malloc2, the fallback strategy often makes some kind of trade-off—otherwise we'd use it all the time. Why use a slower, less capable, or more expensive fallback only when something is already going wrong?
+
+**5. Latent Bugs Everywhere**: Fallback strategies often have latent bugs that show up only when an unlikely set of coincidences occur, potentially months or years after their introduction.
+
+## Real-World Disaster: The Amazon Retail Website Outage
+
+A real-world major outage triggered by a fallback mechanism in the Amazon retail website illustrates all these problems vividly. This outage occurred around 2001 and was caused by a seemingly reasonable fallback strategy that turned a partial outage into a complete disaster.
+
+### The Feature and the Problem
+
+Amazon added a new feature showing up-to-date shipping speeds for all products displayed on the website. At the time, the website architecture had only two tiers—web servers and databases. Since shipping speed data was stored in a supply chain database, web servers needed to query the database directly.
+
+But the database couldn't keep up with the request volume. The website had enormous traffic volume, and some pages displayed 25 or more products, each with shipping speeds shown inline. The query load was crushing the database.
+
+### The Solution (That Became the Problem)
+
+The team added a caching layer running as a separate process on each web server (similar to how Memcached works today):
+
+```
+Web Servers → Cache Process → Supply Chain Database
+```
+
+This worked well. The cache absorbed the vast majority of queries, and only cache misses hit the database. The database load dropped to manageable levels.
+
+But the team also attempted to handle the case where the cache failed for some reason. They implemented a fallback strategy: if the cache process was unhealthy, web servers would revert to querying the database directly.
+
+In pseudo-code:
+
+```javascript
+if (cache_healthy) {
+    shipping_speed = get_speed_via_cache(sku);
+} else {
+    shipping_speed = get_speed_from_database(sku);  // FALLBACK
+}
+```
+
+This fallback seemed intuitive and worked successfully for several months. But eventually, something caused all the caches to fail around the same time.
+
+### The Cascading Disaster
+
+When all caches failed simultaneously, **every web server hit the database directly**. This created massive load—far beyond what the database was designed to handle. The database became completely locked up.
+
+The entire website went down because all web server processes were blocked waiting on the overwhelmed database.
+
+But it got worse. Much worse.
+
+The supply chain database wasn't just used for displaying shipping speeds on the website. It was **critical for fulfillment centers**—the warehouses where Amazon picks, packs, and ships customer orders. When the database locked up from web server queries, **all fulfillment centers worldwide ground to a halt** until the problem was fixed.
+
+<Mermaid title="Cache Fallback Cascading Failure: Cache Outage Overwhelms Database" chart={`graph TD
+    A[All Cache Processes Fail] --> B[All Web Servers Query Database Directly]
+    B --> C[Database Completely Overwhelmed]
+    C --> D[Web Servers Block on Database]
+    D --> E[Website Completely Down]
+    C --> F[Fulfillment Centers Can't Query Database]
+    F --> G[Global Fulfillment Operations Halt]
+
+    style A fill:#ffcccb,color:#1a1a1a
+    style C fill:#ff0000,color:#fff
+    style E fill:#ff6b6b,color:#fff
+    style G fill:#ff6b6b,color:#fff
+`} />
+
+### The Fallback Paradox
+
+The thinking behind the fallback strategy was illogical. If hitting the database directly was more reliable than going through the cache, **why bother with the cache at all**? The team added the cache precisely because they were afraid of overloading the database. But then they added fallback code that did exactly that—overload the database—when something went wrong.
+
+The bug was latent. The situation that caused the outage appeared months after launch. During those months, the fallback code sat dormant, untested in production, harboring a fundamental design flaw that nobody noticed until it was too late.
+
+The fallback turned:
+- A partial website outage (inability to display shipping speeds) into
+- A full-site outage (no pages loaded at all) and
+- Took down the entire Amazon fulfillment network globally
+
+All the problems discussed earlier manifested simultaneously:
+
+- **Hard to test**: Even if the team had simulated cache failures, they wouldn't have found the problem unless they failed all caches simultaneously across all web servers
+- **Fallback amplified the problem**: The fallback strategy itself made things catastrophically worse instead of better
+- **Illogical trade-offs**: The logic was backwards—the fallback did the very thing the primary design aimed to avoid
+- **Latent bug**: The flaw sat dormant for months before manifesting
+
+This outage fundamentally changed how Amazon thinks about fallback in distributed systems.
+
+## How Amazon Avoids Fallback
+
+Given these painful lessons, Amazon now almost always prefers alternatives to fallback. These alternatives provide better availability without the catastrophic risks that fallback introduces.
+
+### 1. Improve Reliability of Non-Fallback Cases
+
+Fallback strategies merely **reduce the likelihood** of complete failures—they don't eliminate them. Making the main (non-fallback) code path more robust provides dramatically higher availability.
+
+Instead of implementing fallback logic between two different data stores (one primary, one fallback), a team could invest in using a database with **inherently higher availability** like Amazon DynamoDB. DynamoDB is designed from the ground up for high availability, with automatic replication across multiple Availability Zones, automated failover, and proven performance at massive scale.
+
+This strategy is used successfully across Amazon. For example, DynamoDB powered amazon.com during Prime Day 2017, handling massive traffic spikes without requiring any fallback mechanisms. The inherent reliability of the primary system eliminates the need for fallback.
+
+**Key principle**: Investing in primary path reliability yields better results than building complex, hard-to-test fallback mechanisms.
+
+### 2. Let the Caller Handle Errors
+
+One powerful solution to critical system failures is: don't fall back at all. Let the calling system handle the failure through its own retry logic.
+
+This is the **preferred strategy for AWS services**, where CLIs and SDKs already have built-in retry logic with exponential backoff and jitter. When a service returns an error, the SDK automatically retries with appropriate backoff, masking many transient failures without the service itself needing fallback logic.
+
+Amazon particularly prefers this strategy when:
+- Enough effort has gone into **sharing fate** (ensuring components fail together rather than independently)
+- Significant work has been done **reducing the likelihood of the main case failing**
+- Fallback logic would be **highly unlikely to improve availability** meaningfully
+
+By pushing error handling to the caller, the service itself remains simpler and more testable. The caller has better context about whether retry is appropriate, how many times to retry, and whether to try alternative endpoints.
+
+### 3. Push Data Proactively
+
+Another powerful approach is to **reduce the number of moving parts when responding to requests**. If data needed to fulfill a request is already present locally—it doesn't need to be fetched during the request—there's no need for a failover or fallback strategy at all.
+
+**Example: IAM Roles for Amazon EC2**
+
+The IAM service needs to provide signed, rotated credentials to code running on EC2 instances. These credentials allow applications to access AWS services like S3 or DynamoDB without embedding long-term credentials in code.
+
+To avoid ever needing to fall back, credentials are **proactively pushed** to every instance and remain valid for many hours. The push happens before credentials are needed, not in response to a request for credentials.
+
+This means that IAM role-related requests keep working even in the unlikely event of a disruption in the push mechanism. The credentials are already there, locally cached, and don't require fetching from a remote service during the critical path of handling a request.
+
+<Callout type="tip">
+**Proactive Push Eliminates Critical Dependencies**: By pushing data before it's needed rather than fetching it on-demand, you eliminate the failure modes associated with remote calls during request processing. The data is already local, so there's nothing to fall back from.
+</Callout>
+
+### 4. Convert Fallback into Failover
+
+One of the worst aspects of fallback is that it's **rarely exercised** in production. The circumstances that trigger fallback might not naturally occur for months or even years. During that time, the fallback code sits dormant, potentially harboring bugs or design flaws that nobody discovers until a critical moment.
+
+To address the problem of latent failures of fallback strategies, it's essential to **exercise fallback regularly in production**. A service must run both the fallback and the non-fallback logic continuously, treating both as active, equally-valid code paths.
+
+The system should not merely run the fallback case occasionally. It must treat it as an **equally valid source of data**. For example, a service might randomly choose between the fallback and non-fallback responses (when it successfully gets both back) to ensure they're both working correctly and producing consistent results.
+
+But at this point, the strategy can no longer be considered fallback. It's now firmly in the category of **failover**—parallel execution of multiple approaches with selection logic to choose the best result.
+
+The key difference:
+- **Fallback**: Use alternative B only when primary A fails (rarely exercised)
+- **Failover**: Use both A and B continuously, selecting the best result (constantly exercised)
+
+By exercising both paths continuously, problems are discovered quickly in normal operation rather than during critical failures. The system's behavior becomes predictable because both paths are always in use.
+
+This follows the design pattern of **constant work**—doing the same operations all the time rather than having special modes that only trigger during failures.
+
+### 5. Ensure Retries and Timeouts Don't Become Fallback
+
+Retries are discussed extensively in the Amazon Builders' Library article "Timeouts, Retries, and Backoff with Jitter." Retries are a powerful mechanism for providing high availability in the face of transient and random errors like spurious packet loss, uncorrelated single-machine failures, and brief resource contention.
+
+Retries provide **insurance against occasional failures** due to minor issues. But it's dangerously easy to get retries wrong and have them behave like fallback—triggering rarely-tested code paths during chaotic failure scenarios.
+
+Services often go for months or longer without needing many retries. These retries might finally kick in during scenarios that teams have never tested. When that happens, the retry logic can behave unpredictably, potentially amplifying failures rather than masking them.
+
+**Amazon's approach to preventing retries from becoming fallback**:
+
+**Maintain metrics on retry rates**: Monitor overall retry rates continuously and set alarms that alert teams if retries are happening frequently. Frequent retries indicate a problem that needs investigation.
+
+**Use proactive retry (hedging)**: Execute requests to multiple backends simultaneously and use the first successful response. This technique is inherently built into systems that perform quorum reads or writes, where a system might require answers from two out of three servers to respond.
+
+**Follow the constant work pattern**: Because redundant requests are always being made in a hedging approach, **no extra load from retries is added to the system** as the need for the redundant requests increases. The system is always doing the same work, regardless of whether dependencies are healthy or struggling.
+
+Proactive retry transforms unpredictable, rarely-tested retry logic into constant, always-exercised parallel execution.
+
+**Try it yourself:** Experiment with the interactive simulation below to see how circuit breakers and fallback patterns behave in practice.
+
+<CircuitBreakerDemo />
+
+## Comparative Analysis: Fallback vs. Alternatives
+
+To solidify understanding, let's compare fallback with the alternatives across several dimensions:
+
+| Dimension | Fallback | Improve Primary | Let Caller Handle | Proactive Push | Failover (Constant) |
+|-----------|----------|----------------|-------------------|----------------|---------------------|
+| **Testing** | Extremely difficult | Straightforward | Straightforward | Straightforward | Straightforward (always running) |
+| **Production Exercise** | Rare or never | Constant | Constant | Constant | Constant |
+| **Latent Bugs** | High risk | Low risk | Low risk | Low risk | Low risk |
+| **Impact During Failure** | Often amplifies | Prevents | Delegates | Prevents | Masks |
+| **Complexity** | High | Low to Medium | Low | Medium | Medium to High |
+| **Cost** | Low (until it fails) | Medium | Low | Medium | Medium to High |
+| **When to Use** | Almost never | Default choice | When callers can retry | When data is cacheable | When both paths are valid |
+
+This table makes clear why Amazon avoids fallback: it scores poorly on nearly every dimension except cost, and even that advantage disappears when fallback triggers and causes a major outage.
+
+## Design Principles for Avoiding Fallback
+
+Based on Amazon's experience, several design principles emerge for building systems without fallback:
+
+**1. Invest in Primary Path Reliability**: Make the main code path so reliable that fallback becomes unnecessary. Use inherently reliable services like DynamoDB. Design for redundancy and fault tolerance from the start.
+
+**2. Exercise All Code Paths Constantly**: If you must have alternative code paths, run them continuously in production. Don't have modes that only activate during failures.
+
+**3. Push Don't Pull**: Proactively push data to where it's needed before requests arrive, rather than fetching data on-demand during request processing.
+
+**4. Share Fate Deliberately**: Design components to fail together rather than independently when it makes sense. If component A needs component B to function meaningfully, let them share fate rather than having A fall back to degraded behavior.
+
+**5. Simple Error Handling**: Let callers retry rather than implementing complex service-side fallback logic. Push complexity to the edges where it's easier to test and reason about.
+
+**6. Constant Work Over Conditional Work**: Systems that do the same work all the time are more reliable than systems with special failure modes.
+
+## When Fallback Might Be Acceptable
+
+This lesson has argued strongly against fallback in distributed systems. Are there any cases where fallback is acceptable?
+
+Yes, but they're rare and specific:
+
+**Display Degradation**: Showing simplified UI when detailed UI components fail to load. This type of fallback affects only presentation, not critical functionality, and is easy to test.
+
+**Read-Only Fallback**: Allowing read operations but blocking write operations during certain failure modes. This is really more of a degraded mode than true fallback.
+
+**Cached Data**: Serving stale cached data when fresh data is unavailable, with clear indication to users that data may be out of date. This must be designed carefully to avoid consistency issues.
+
+Even in these cases, the principles still apply: exercise the fallback path regularly, keep it simple, and consider whether alternatives might be better.
+
+## Conclusion
+
+At Amazon, we avoid fallback in distributed systems because it's difficult to prove, hard to test, and its effectiveness is nearly impossible to validate. Fallback strategies introduce an operational mode that systems enter only during the most chaotic moments when things are breaking, and switching to this mode only increases the chaos.
+
+There's often a long delay—months or even years—between when a fallback strategy is implemented and when it's encountered in a production environment. During that time, it sits untested, potentially harboring fundamental design flaws or bugs.
+
+The Amazon retail website outage caused by cache fallback illustrates this perfectly: a reasonable-seeming fallback strategy turned a partial outage (inability to show shipping speeds) into a complete disaster (website down and global fulfillment halt). The fallback amplified the failure rather than containing it.
+
+Instead of fallback, Amazon favors:
+
+- **Improving primary code path reliability** through better architecture and more reliable services
+- **Letting callers handle errors** through retry logic in SDKs and CLIs
+- **Pushing data proactively** to eliminate critical request-path dependencies
+- **Converting necessary fallback into failover** by exercising all paths continuously
+- **Constant work patterns** that avoid rarely-tested failure modes
+
+These alternatives provide better availability, are easier to test, are continuously exercised in production, and don't harbor the catastrophic risks that fallback introduces.
+
+When building distributed systems, resist the temptation to add fallback mechanisms. Instead, ask: Can I make the primary path more reliable? Can I push this data proactively? Can I let the caller handle this error? Can I exercise both paths continuously?
+
+If fallback truly is essential for your system, exercise it as often as possible in production so that fallback behaves just as reliably and predictably as the primary mode of operation. At that point, you've transformed it into failover, and your system is better for it.
+
+<KeyTakeaways>
+- **Fallback is dangerous in distributed systems**: It's extremely difficult to test, often makes outages worse by amplifying failures, and introduces rarely-exercised code paths that fail precisely when you need reliability most
+- **Improve primary code instead of adding fallback**: Investing in primary code path reliability (like using DynamoDB instead of less reliable alternatives) provides far better availability than complex, hard-to-test fallback mechanisms
+- **Let callers handle errors with retry logic**: Built-in retry logic in AWS SDKs and CLIs provides better resilience than service-level fallback because callers have better context and retry logic is continuously exercised
+- **Proactive push eliminates fallback needs**: Pushing data before it's needed (like IAM credentials to EC2 instances) removes critical request-path dependencies, eliminating the entire class of failures that fallback attempts to address
+- **Convert fallback to failover by exercising continuously**: If alternative code paths are essential, run them continuously in production alongside primary paths, treating both as equally valid—transforming unpredictable fallback into predictable failover
+- **The cache fallback disaster teaches lasting lessons**: Amazon's 2001 outage—where cache failure fallback to direct database access crashed the website and halted global fulfillment—exemplifies how fallback can catastrophically amplify problems it was designed to solve
+- **Constant work beats conditional work**: Systems doing the same operations all the time are more reliable than systems with special failure modes that only activate during chaos when testing is impossible
+- **Latent bugs in fallback manifest at the worst times**: Fallback code can sit untested for months or years, harboring fundamental design flaws that only surface during critical failures when you least want to discover bugs
+</KeyTakeaways>

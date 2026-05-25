@@ -1,0 +1,60 @@
+{
+  "lessonSlug": "dashboards-operational-visibility",
+  "questions": [
+    {
+      "question": "Your team receives feedback that the main service dashboard is overwhelming to new operators, with 50+ graphs displaying various metrics. Senior engineers understand it well, but newer team members struggle during incidents. What action best aligns with Amazon's dashboarding principles?",
+      "options": [
+        "Create separate customer experience and system-level dashboards, moving most important availability and latency metrics to the top of a high-level dashboard, with links to detailed dashboards for deep dives",
+        "Add detailed descriptions below each graph explaining what the metrics mean and when to be concerned",
+        "Reduce the time interval shown on each graph to focus on recent data",
+        "Organize graphs alphabetically by metric name for easier navigation"
+      ],
+      "correctIndex": 0,
+      "explanation": "Amazon deliberately avoids information overload by creating different dashboard types for different audiences. A high-level customer experience dashboard should show only the most critical aggregated metrics at the top, with links to detailed dashboards for when operators need to dive deeper. This makes dashboards accessible to broader audiences while still supporting detailed investigation."
+    },
+    {
+      "question": "You're designing a dashboard for a payment processing API that handles both small transactions (average 100ms) and large batch transactions (average 5000ms). Currently, one latency graph shows p50, p99, and p100, but the p100 spikes from batch processing make it hard to see patterns in the p50. How should you improve this dashboard?",
+      "options": [
+        "Create separate graphs for small and large transaction latencies, plus an overall latency graph, to show per-mode metrics alongside aggregated metrics",
+        "Remove the p100 metric from the graph to reduce visual noise",
+        "Use a logarithmic y-axis scale to compress the range and show all metrics together",
+        "Increase the y-axis upper bound to a fixed value that accommodates the p100 spikes"
+      ],
+      "correctIndex": 0,
+      "explanation": "Amazon's best practice for multi-modal behavior is to add per-mode metrics. This dashboard should show overall latencies plus separate graphs for small and large transactions. This prevents disparate value ranges from obscuring important patterns while still providing the full picture. Simply removing metrics or adjusting scales doesn't address the root issue of mixing different behavioral modes."
+    },
+    {
+      "question": "During a weekly operations review, your dashboard shows a three-day period with 5-minute resolution (864 datapoints). Leadership wants to see quarterly trends instead. The dashboard currently takes 45 seconds to load. What configuration best supports this use case?",
+      "options": [
+        "Configure 3-months × 1-day resolution (90 datapoints) to show quarterly trends while keeping the dashboard responsive",
+        "Keep the current 5-minute resolution but expand to a 3-month time interval for maximum detail",
+        "Use 3-months × 1-hour resolution (2,160 datapoints) to balance detail and performance",
+        "Create a separate dashboard specifically for quarterly reviews with manual data aggregation"
+      ],
+      "correctIndex": 0,
+      "explanation": "Amazon has identified common interval × resolution ratios for different use cases. For quarterly trends, 3-months × 1-day (90 datapoints) provides appropriate granularity while maintaining dashboard performance. Excessive datapoints slow loading and actually reduce visibility into anomalies. The dashboard should support quick interval/resolution adjustments for different review contexts."
+    },
+    {
+      "question": "Your service's error rate metric is only emitted when errors actually occur, resulting in graphs that are empty most of the time. During a recent incident, operators initially thought monitoring was broken because they saw empty graphs. What change would align with Amazon's best practices?",
+      "options": [
+        "Modify the service to continuously emit zero values for the error metric when no errors are occurring",
+        "Add a text annotation on the dashboard explaining that empty graphs indicate no errors",
+        "Display only the most recent non-zero datapoint as a single number widget instead of a time series",
+        "Configure the graph to show 'No Data' instead of an empty chart when no metrics are emitted"
+      ],
+      "correctIndex": 0,
+      "explanation": "Amazon avoids sparse metrics that create confusing empty graphs. The correct solution is to modify the service to continually emit safe (zero) values in the absence of errors. This way, operators can immediately distinguish between 'no errors' (zero values displayed) and 'monitoring broken' (no data at all). Visual clarity during incidents is critical, and this pattern applies to all sparse metrics."
+    },
+    {
+      "question": "Your team deployed a new microservice feature last week. During today's code review, you're about to deploy another feature that adds a new dependency on a caching layer. The reviewer asks, 'Do we need to update any dashboards?' What should you do?",
+      "options": [
+        "Update the microservice's dependency dashboard now to include cache hit rates, latency, and error metrics before deploying the code change",
+        "Note the dashboard update as a post-deployment task since the feature works without dashboard changes",
+        "Wait until the first incident involving the cache to determine what metrics to add to dashboards",
+        "Only update dashboards if the cache becomes a performance bottleneck in production"
+      ],
+      "correctIndex": 0,
+      "explanation": "Amazon empowers developers to update dashboards before deploying changes. This avoids situations where operators must update dashboards during or after deployment to validate the change. New dependencies should be added to dependency dashboards immediately, showing metrics like latency, error rates, and cache-specific data (hit rates). This ensures visibility exists from day one, not after the first incident."
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "lessonSlug": "rollback-safety",
+  "questions": [
+    {
+      "question": "Your service currently stores customer preferences in JSON format. You want to migrate to Protocol Buffers for better performance. You plan to deploy a change that writes Protocol Buffers and reads both JSON and Protocol Buffers. What is the problem with this approach?",
+      "options": [
+        "This is fine—the change reads both formats so it's backward compatible",
+        "This change writes Protocol Buffers immediately, but old servers in the fleet during rolling deployment can't read Protocol Buffers yet, causing failures",
+        "Protocol Buffers don't support reading JSON, so this won't work",
+        "The change should write JSON and read Protocol Buffers instead"
+      ],
+      "correctIndex": 1,
+      "explanation": "This is a classic one-phase deployment mistake. During the rolling deployment, servers with the new code start writing Protocol Buffers immediately. However, servers that haven't been updated yet (still running old code) can only read JSON and will fail to read the Protocol Buffer data. You need two-phase deployment: Prepare phase adds Protocol Buffer reading to all servers (while still writing JSON), then Activate phase switches writing to Protocol Buffers."
+    },
+    {
+      "question": "You've completed a two-phase deployment to change your data format from XML to JSON. The Prepare phase deployed 2 weeks ago (all servers now read both formats but write XML). The Activate phase just completed (all servers now write JSON). A critical bug unrelated to the format change requires rolling back to the version before the Prepare phase. What will happen?",
+      "options": [
+        "The rollback will succeed—both phases are individually rollback-safe",
+        "The rollback will fail because servers before the Prepare phase can't read JSON data that was written after the Activate phase",
+        "The rollback will succeed but data will be corrupted",
+        "The deployment system will prevent this rollback automatically"
+      ],
+      "correctIndex": 1,
+      "explanation": "While each phase is individually rollback-safe, you cannot roll back both phases together. After Activate completes, data is being written in JSON. Rolling back to before Prepare means going to servers that only know how to read XML, not JSON—they'll fail to read the JSON data. This is why Amazon uses bake periods of several days between phases and why you can't remove old format support until all data is backfilled."
+    },
+    {
+      "question": "Your team uses AWS CodeDeploy configured with minimumHealthyHosts set to 90% for a two-phase deployment. The Prepare phase deployment shows success with 95 of 100 hosts updated. You're about to start the Activate phase. Following Amazon's precautions, what should you do?",
+      "options": [
+        "Proceed with the Activate phase since 95% exceeds the 90% minimum",
+        "Investigate why 5 hosts failed to update and ensure 100% success before proceeding to Activate",
+        "Lower the minimumHealthyHosts requirement to 85% to allow more failures",
+        "Roll back the Prepare phase and start over"
+      ],
+      "correctIndex": 1,
+      "explanation": "A critical assumption in two-phase deployment is that ALL servers successfully deployed the Prepare phase. If even one server failed to upgrade, it will fail to read new-format data during and after the Activate phase, potentially causing widespread failures. Amazon explicitly verifies 100% deployment success at the end of each phase, regardless of minimumHealthyHosts settings. You must investigate and fix the 5 failed hosts before proceeding."
+    },
+    {
+      "question": "Your test environment for rollback safety testing has 10 servers, but to speed up testing, you deploy to all 10 servers simultaneously. During production deployment, you encounter rollback failures that weren't caught in testing. What's the likely cause?",
+      "options": [
+        "Production has more servers than your test environment",
+        "Deploying to all servers simultaneously in testing prevented old and new versions from running concurrently, missing issues that occur with mixed-version fleets",
+        "The test environment needs more sophisticated monitoring",
+        "You should test with only one server to match production deployment waves"
+      ],
+      "correctIndex": 1,
+      "explanation": "Deploying to all test servers at once makes deployments atomic—old and new versions never run simultaneously. This prevents detecting issues that occur when different versions coexist during rolling deployments, like data compatibility problems or RPC protocol mismatches. Amazon uses the same deployment configuration in test and production environments to ensure version coexistence happens in testing, typically deploying to about half the fleet first."
+    },
+    {
+      "question": "You need to change the heartbeat interval between two services from 30 seconds to 60 seconds to reduce network traffic. How should you structure this change using two-phase deployment?",
+      "options": [
+        "Prepare: Send heartbeats every 60s. Activate: Expect heartbeats every 60s",
+        "Prepare: Expect heartbeats every 60s (but still send every 30s). Activate: Send heartbeats every 60s",
+        "Deploy the change all at once since it's just a configuration parameter",
+        "Prepare: Send and expect every 45s. Activate: Send and expect every 60s"
+      ],
+      "correctIndex": 1,
+      "explanation": "In the Prepare phase, relax the expectation first—make all servers expect heartbeats every 60 seconds, but continue sending every 30 seconds. This way, old and new versions can coexist without terminating connections. In the Activate phase, change the sending frequency to 60 seconds—now it's safe because all servers are expecting the slower rate. Option A would cause connection terminations during Prepare. Option D creates an intermediate state that adds complexity without benefit."
+    }
+  ]
+}

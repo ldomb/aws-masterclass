@@ -1,0 +1,60 @@
+{
+  "lessonSlug": "minimizing-correlated-failures",
+  "questions": [
+    {
+      "question": "Your service runs on 100 servers across 3 Availability Zones. Each server has a 0.1% daily failure rate. Assuming complete infrastructure independence between zones, approximately what is the probability that at least one server in EACH zone fails on the same day?",
+      "options": [
+        "0.000001% - multiple independent failures compound to extremely low probability",
+        "Much higher than simple probability math suggests, because software bugs affect all servers identically",
+        "0.1% - the same as a single server because failures correlate",
+        "It cannot be calculated without knowing the specific failure modes"
+      ],
+      "correctIndex": 1,
+      "explanation": "While infrastructure failures might be independent across zones, all servers run identical software with identical limits and bugs. A software defect, resource exhaustion condition, or load-related failure that affects one server will likely affect others simultaneously, regardless of which Availability Zone they're in. This is why techniques like jitter and shuffle sharding are important—they reduce software and behavioral correlation even when infrastructure is independent."
+    },
+    {
+      "question": "Your operations team needs to update the kernel on all EC2 instances in your fleet. The current plan is to SSH to all servers in parallel using a script to minimize update duration. What practice would most effectively reduce correlated failure risk?",
+      "options": [
+        "Run the script during off-peak hours when impact is minimized",
+        "Update one Availability Zone at a time with velocity controls (small percentages of servers) and feedback loops that halt on errors",
+        "Test the update on a single server first, then proceed with parallel execution if successful",
+        "Create AMIs with the new kernel and launch new instances gradually to replace old ones"
+      ],
+      "correctIndex": 1,
+      "explanation": "Updating one AZ at a time preserves the Availability Zone isolation boundary your architecture depends on. Adding velocity controls (small batches with delays) and feedback loops (monitoring for problems, automatic halt on errors) ensures that if something goes wrong, it affects only a small percentage of one zone before being detected and stopped. Option D is also good but changes the question's scenario. Option A doesn't reduce correlation risk. Option C tests but then removes all safety measures."
+    },
+    {
+      "question": "Your application caches configuration data that expires every hour. After a deployment, you notice traffic spikes to your configuration service at exactly the top of each hour. What pattern is this, and how should you address it?",
+      "options": [
+        "This is normal cache behavior; no action needed if the service handles the load",
+        "Correlated behavior from synchronized cache expiration; add jitter to TTLs so each server expires at slightly different times",
+        "Infrastructure correlation from Availability Zone dependency; deploy cache servers to multiple zones",
+        "A software bug causing premature cache expiration; fix the caching logic"
+      ],
+      "correctIndex": 1,
+      "explanation": "This is correlated behavior—all servers with identical 1-hour TTLs refresh simultaneously, creating a spike. Adding jitter (randomness to TTL values) spreads refreshes over time, smoothing load. For example, TTL of 3600 ± 180 seconds means servers refresh anywhere from 57-63 minutes, preventing synchronized behavior. This is not a bug but a predictable consequence of uniform configuration that can be improved with randomization."
+    },
+    {
+      "question": "You're investigating an outage where all servers in your fleet failed within 5 minutes despite being distributed across 3 Availability Zones. A recent deployment introduced a memory leak that causes crashes after processing 10,000 requests. What type of correlation caused this?",
+      "options": [
+        "Infrastructure correlation - the Availability Zones weren't properly isolated",
+        "Software correlation - identical code with an identical bug affected all servers identically under similar load",
+        "Behavioral correlation - clients all changed their behavior simultaneously",
+        "Operational correlation - a tool executed commands in parallel across the fleet"
+      ],
+      "correctIndex": 1,
+      "explanation": "This is software correlation. All servers ran identical code with the same bug. With evenly distributed load, all servers processed approximately 10,000 requests at approximately the same time, triggering the memory leak simultaneously. Infrastructure was properly isolated (multiple AZs), and the cause wasn't operational tooling or client behavior changes. This illustrates why gradual rollouts with monitoring are critical—deploying to a small percentage first would have revealed the issue before affecting the entire fleet."
+    },
+    {
+      "question": "Why does AWS infrastructure deploy software updates to different Availability Zones on different days, even though phased rollouts (one-box, then 1%, then 10%, etc.) already exist within each zone?",
+      "options": [
+        "To reduce network bandwidth consumption from simultaneous downloads",
+        "To preserve Availability Zone independence—if a deployment problem occurs, it affects one zone while others continue with previous software versions",
+        "Regional compliance requirements mandate staggered updates",
+        "To allow time for monitoring metrics to stabilize between zones"
+      ],
+      "correctIndex": 1,
+      "explanation": "Separating deployments by time across Availability Zones maintains zone independence as a reliable fault boundary. Even with careful phased rollouts within a zone, a deployment issue might not be detected until it affects more servers. If the same deployment progressed simultaneously in all zones, a subtle bug could impact multiple zones before detection. Time-separated deployments ensure that a problem in one zone is fully detected, analyzed, and rolled back before other zones receive the problematic deployment."
+    }
+  ]
+}

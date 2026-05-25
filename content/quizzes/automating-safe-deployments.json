@@ -1,0 +1,60 @@
+{
+  "lessonSlug": "automating-safe-deployments",
+  "questions": [
+    {
+      "question": "Your team maintains a microservice with application code, infrastructure code, configuration files, and operator tools. Currently, all four are deployed through a single pipeline. A bug in the infrastructure code blocks the pipeline, preventing a critical configuration update from deploying. How should you restructure following Amazon's approach?",
+      "options": [
+        "Keep everything in one pipeline but add a manual override option for critical changes",
+        "Create separate pipelines for each source type (application, infrastructure, configuration, tools) so issues in one don't block others",
+        "Create two pipelines: one for application code and one for everything else",
+        "Keep one pipeline but allow certain file paths to skip failed stages"
+      ],
+      "correctIndex": 1,
+      "explanation": "Amazon creates separate pipelines for each source type—application code, infrastructure, configuration, and tools each get dedicated pipelines with the same safety mechanisms. This way, issues blocking one pipeline (like infrastructure test failures) don't prevent other changes (like critical configuration updates) from reaching production. A typical microservice has 5+ pipelines."
+    },
+    {
+      "question": "Your team's code review checklist currently focuses only on code correctness and test coverage. Based on Amazon's practices for automated deployment pipelines, what additional deployment safety checks should code reviewers verify?",
+      "options": [
+        "Nothing else—code correctness and tests are sufficient for code review",
+        "Deployment safety: adequate monitoring instrumentation, ability to deploy without triggering alarms, rollback safety, and dependency deployment status",
+        "Only verify that the change has been tested in a local environment",
+        "Performance benchmarks and load testing results"
+      ],
+      "correctIndex": 1,
+      "explanation": "With fully automated pipelines, code review is the last manual gate before production. Amazon's reviewers evaluate deployment safety explicitly: Is the change adequately instrumented for monitoring? Can it deploy without triggering alarms? Can it be safely rolled back? Are dependent changes already deployed? These checks prevent deployment issues that automated testing might miss."
+    },
+    {
+      "question": "Your gamma environment has 50 containers. You're deploying a new version that changes the data serialization format. Following Amazon's one-box testing approach, how should you structure the gamma deployment?",
+      "options": [
+        "Deploy to all 50 containers simultaneously since gamma is pre-production",
+        "Deploy to 1 container while leaving the other 49 on current code, monitor the mixed fleet for 30-60 minutes with canary tests to detect compatibility issues",
+        "Deploy to 25 containers to get a 50/50 split for better comparison",
+        "Deploy to a separate gamma environment that doesn't receive any traffic"
+      ],
+      "correctIndex": 1,
+      "explanation": "Amazon's one-box testing deploys new code to the smallest unit (1 container, VM, or small Lambda percentage) while leaving the rest of the environment on current code. This mixed fleet runs for a period (30-60 minutes) with canary tests monitoring for issues like backward compatibility problems. This catches issues where new and old code can't coexist before deploying to production. A no-traffic environment (option D) wouldn't detect real issues."
+    },
+    {
+      "question": "Your production deployment just completed successfully, and all health checks passed. The deployment system wants to immediately promote to the next stage. However, you're concerned about slow-burning issues that might not appear immediately. What mechanism does Amazon use to address this concern?",
+      "options": [
+        "Require manual approval before each stage promotion to allow human review",
+        "Add more health checks that run more frequently",
+        "Implement bake time where the pipeline continues monitoring high-severity aggregate alarms for a period after deployment before promoting",
+        "Deploy more slowly by reducing the percentage of instances deployed at once"
+      ],
+      "correctIndex": 2,
+      "explanation": "Amazon uses bake time to catch slow-burning issues that don't appear immediately during deployment, especially under low load. After deployment completes, the pipeline continues monitoring the team's high-severity aggregate alarm for a period before promoting to the next stage. Bake time is longer in early waves (e.g., 12 hours) to build confidence, and shorter in later waves (e.g., 2-4 hours). Manual approval (option A) doesn't scale for automated deployments happening multiple times daily."
+    },
+    {
+      "question": "During a deployment, your one-box environment shows a 2% increase in fault rate, but the overall service fault rate hasn't changed because the one-box handles only 5% of traffic. The service's high-severity alarm (which triggers on overall fault rate) hasn't fired. What should happen?",
+      "options": [
+        "Continue the deployment since the overall service alarm hasn't triggered",
+        "The one-box stage should automatically roll back because it monitors one-box-scoped metrics in addition to the high-severity aggregate alarm",
+        "Manually review the metrics and decide whether to continue",
+        "Wait longer to see if the issue affects more of the service"
+      ],
+      "correctIndex": 1,
+      "explanation": "Amazon's one-box stages monitor both the high-severity aggregate alarm and metrics scoped specifically to the one-box (like fault rate of requests served by the one-box only). Since the one-box serves small traffic percentages, issues might not trigger overall service alarms. One-box-specific monitoring catches these issues before they reach the rest of production. This is automatic, not manual."
+    }
+  ]
+}

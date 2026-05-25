@@ -1,0 +1,60 @@
+{
+  "lessonSlug": "chaos-engineering",
+  "questions": [
+    {
+      "question": "Your team has comprehensive unit tests and integration tests in their CI/CD pipeline that validate circuit breakers, retries, and failover logic. A senior engineer suggests adding chaos engineering experiments. The team responds: 'We already have resilience testing—why do we need chaos engineering?' How would you explain the difference?",
+      "options": [
+        "Chaos engineering and resilience testing are the same thing, just different names",
+        "Resilience testing deterministically validates known failure modes with pass/fail results, while chaos engineering non-deterministically discovers unknown weaknesses through hypothesis-based experiments",
+        "Chaos engineering is only for large companies like Amazon, not needed for smaller teams",
+        "Resilience testing is for pre-production, chaos engineering is only for production"
+      ],
+      "correctIndex": 1,
+      "explanation": "Resilience testing is deterministic—it validates that known resilience mechanisms (circuit breakers, retries, failovers) work as designed, producing pass/fail results suitable for CI/CD pipelines. Chaos engineering is non-deterministic—it uses hypothesis-based experiments to discover unknown failure modes and verify mental models about how the entire system (people, processes, technology) responds to unanticipated conditions. Both are valuable and complementary practices."
+    },
+    {
+      "question": "Your team wants to run their first chaos experiment by injecting network latency into production to see how the application handles it. They plan to run the experiment during peak business hours tomorrow. What guidance should you provide based on AWS best practices?",
+      "options": [
+        "This is fine—chaos engineering should test real-world conditions in production",
+        "Run the first experiment in a lower environment (dev/test) to understand behavior with minimal customer impact potential, then progressively move through environments as confidence builds",
+        "Schedule it for off-hours instead of peak hours, but running in production first is acceptable",
+        "Use AWS FIS safety levers during the experiment so it can run safely in production"
+      ],
+      "correctIndex": 1,
+      "explanation": "AWS recommends never conducting initial chaos experiments on production applications. The purpose of a first experiment is learning something new about unpredictable behavior under stress. Start in lower environments with minimal potential for affecting users, then iterate through environments after verifying the application can absorb, adapt to, and recover from the injected actions. Safety levers (option D) are important but don't make a first-time production experiment safe."
+    },
+    {
+      "question": "Your chaos experiment plan defines steady state as 'the application is running with no errors.' During the experiment, you inject an API failure but can't determine if it had any impact because your definition is too vague. What should you have done differently when defining steady state?",
+      "options": [
+        "Steady state should be defined with specific business metrics like transactions per second, success rate percentages, and latency measurements that establish a quantifiable baseline",
+        "Use server CPU and memory utilization as the primary steady state definition",
+        "Define steady state as zero errors and zero latency increases",
+        "Rely on application logs to determine if steady state is maintained"
+      ],
+      "correctIndex": 0,
+      "explanation": "Steady state should be defined by specific, measurable business metrics that indicate normal operation—like 300 TPS with 99% success rate and 500ms latency. This creates a quantifiable baseline that makes deviations obvious. Vague definitions like 'no errors' don't provide the measurement precision needed to detect impact. Zero errors (option C) is unrealistic—steady state can include acceptable fault percentages. CPU/memory (option B) are important server metrics but don't capture business impact."
+    },
+    {
+      "question": "Your organization conducts chaos experiments quarterly on critical services. Experiments have revealed several resilience gaps, but the backlog prioritizes new features over remediation work. How should you address this based on AWS organizational resilience guidance?",
+      "options": [
+        "Continue experiments quarterly and accumulate remediation items for future sprints when time permits",
+        "Stop chaos experiments until the team has time to address findings—there's no point finding issues if you won't fix them",
+        "Engage executive sponsorship to ensure findings that directly impact resilience or security are prioritized over new features based on business risk tolerance",
+        "Create a separate team to handle all remediation work from chaos experiments"
+      ],
+      "correctIndex": 2,
+      "explanation": "AWS recommends that findings directly impacting resilience or security should have priority over new features to avoid customer impact. If teams struggle to prioritize remediation over features, engage executive sponsors to ensure priorities align with business risk tolerance. Stopping experiments (option B) prevents discovering new issues. Accumulating unaddressed findings (option A) defeats the purpose of chaos engineering. A separate remediation team (option D) doesn't address the prioritization problem."
+    },
+    {
+      "question": "During a chaos experiment, you're using AWS FIS to inject EC2 instance failures. Midway through, a critical CloudWatch alarm unrelated to your experiment fires, indicating a production issue. What AWS FIS feature should you use, and what happens?",
+      "options": [
+        "Use stop conditions configured in the experiment template, which will stop and roll back the specific experiment if alarms fire",
+        "Manually stop the experiment through the AWS FIS console",
+        "Engage the safety lever, which stops and rolls back all running experiments in the account/region and prevents new experiments from starting",
+        "Continue the experiment since it's unrelated to the production issue"
+      ],
+      "correctIndex": 2,
+      "explanation": "AWS FIS safety levers stop and roll back ALL running experiments in the account/region (including multi-account experiments) and prevent new experiments from starting. This is appropriate when production health issues occur, as experiments could compound the problem. Stop conditions (option A) are configured per-experiment but may not catch unrelated production issues. Safety levers provide the emergency brake for broader situations. Continuing the experiment (option D) risks making the production issue worse."
+    }
+  ]
+}

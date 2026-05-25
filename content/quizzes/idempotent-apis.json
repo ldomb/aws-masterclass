@@ -1,0 +1,60 @@
+{
+  "lessonSlug": "idempotent-apis",
+  "questions": [
+    {
+      "question": "Your service implements idempotency by hashing all request parameters to generate a token. A customer makes two identical EC2 launch requests 5 minutes apart. What's the problem with this approach?",
+      "options": [
+        "Hash collisions will cause data corruption",
+        "The customer might genuinely want two identical instances, not a retry",
+        "Hashing is too slow for high-throughput services",
+        "Parameters can't be hashed reliably across different SDK versions"
+      ],
+      "correctIndex": 1,
+      "explanation": "Inferring idempotency from identical parameters creates ambiguity. While two identical DynamoDB table creation requests might be duplicates, two identical EC2 launch requests might represent genuine intent to create two instances. Caller-provided tokens eliminate this ambiguity."
+    },
+    {
+      "question": "You're implementing idempotent resource creation. Your code records the client token in the database, then creates the resource in a separate transaction. What critical requirement are you violating?",
+      "options": [
+        "Performance - two database transactions are too slow",
+        "Security - the token should be encrypted",
+        "ACID properties - token recording and resource creation must be atomic",
+        "Scalability - this approach won't work for high request rates"
+      ],
+      "correctIndex": 2,
+      "explanation": "Recording the idempotent token and creating the resource must be an ACID (Atomic, Consistent, Isolated, Durable) operation. Separate transactions risk recording the token without creating the resource (or vice versa), breaking idempotency guarantees."
+    },
+    {
+      "question": "A client calls CreateDatabase with token 'abc-123' but gets no response due to network timeout. The database was created successfully. On retry with the same token, what response provides the best customer experience?",
+      "options": [
+        "Return 'ResourceAlreadyExists' error to indicate the database exists",
+        "Return the same success response as the first request would have returned",
+        "Return an error indicating the request was a duplicate",
+        "Create a second database to honor the retry"
+      ],
+      "correctIndex": 1,
+      "explanation": "Returning a semantically equivalent success response (same as the first successful request) prevents client-side effects from retries. While 'ResourceAlreadyExists' technically meets idempotency, it forces clients to handle a scenario that didn't exist from their perspective, complicating retry logic."
+    },
+    {
+      "question": "Your idempotent API receives a request with a token it has seen before, but with different parameters than the original request. What should you do?",
+      "options": [
+        "Use the new parameters to update the existing resource",
+        "Return the existing resource, ignoring the parameter differences",
+        "Return a validation error indicating parameter mismatch",
+        "Generate a new token automatically and process the request"
+      ],
+      "correctIndex": 2,
+      "explanation": "Different parameters with the same token likely indicate different customer intent, not a retry. Returning a validation error for parameter mismatches allows customers to explicitly state their intent and prevents unexpected outcomes. This requires storing original parameters with the token."
+    },
+    {
+      "question": "How long should your service retain idempotent tokens for EC2 instance creation to handle late-arriving requests?",
+      "options": [
+        "Forever - tokens should never expire",
+        "24 hours - long enough for any reasonable retry",
+        "Lifetime of the instance plus a reasonable interval for late arrivals",
+        "Until the instance transitions to 'running' state"
+      ],
+      "correctIndex": 2,
+      "explanation": "Amazon retains tokens for the lifetime of the resource plus an interval after which late-arriving requests would no longer be valid. Indefinite retention is impractical and could cause identifier collisions. Expiring too soon breaks the idempotency guarantee for delayed retries."
+    }
+  ]
+}

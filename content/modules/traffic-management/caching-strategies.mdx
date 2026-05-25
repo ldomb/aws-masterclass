@@ -1,0 +1,1250 @@
+## Introduction
+
+Over years of building services at Amazon, we've experienced various versions of the following scenario countless times:
+
+We build a new service that makes network calls to fulfill its requests—perhaps to a relational database, to DynamoDB, or to another internal service. In simple tests at low request rates, everything works beautifully. Performance is excellent. Dependencies handle the load effortlessly. Everyone is pleased with the results.
+
+But we notice a problem on the horizon. The calls to downstream services are slow, or the database will become expensive to scale out as call volume increases. We also notice that many requests use the same downstream resource or query results. The solution seems obvious: add a cache. Caching this data could be the answer to our latency and scaling problems.
+
+We add a cache, and our service appears miraculously transformed. Request latency drops dramatically. Costs plummet as we reduce expensive database queries. Small downstream availability drops are smoothed over—the cache serves stale data while dependencies recover. After a while, no one can remember life before the cache. Dependencies reduce their fleet sizes accordingly, banking on the reduced load. The database scales down to save costs. Everyone celebrates the efficiency gains.
+
+Just when everything appears to be going well, the service could be poised for disaster.
+
+There could be changes in traffic patterns that the cache isn't optimized for. The cache fleet itself could fail, leaving the service exposed. Unexpected circumstances could lead to a cold or otherwise unavailable cache. Any of these situations could trigger a surge of traffic to downstream services that can lead to outages—both in our dependencies and in our own service.
+
+**The service has become addicted to its cache**. The cache has been inadvertently elevated from a helpful addition to the service to a necessary and critical part of its ability to operate.
+
+At the heart of this issue is the **modal behavior** introduced by the cache—differing system behavior depending on whether a given object is cached or not. An unanticipated shift in the distribution of this modal behavior can potentially lead to disaster. The cache hit rate drops, load surges to dependencies, those dependencies can't handle the load they were historically protected from, and cascading failures ensue.
+
+We have experienced both the ecstasy and the agony of caches in the course of building and operating services at Amazon. The benefits are real and compelling—improved latency, reduced costs, better availability. But the challenges are equally real—operational complexity, potential for cache-induced outages, security concerns, and the subtle ways caches can mask problems until they become catastrophic.
+
+The remainder of this lesson describes our lessons learned, best practices, and considerations for using caches effectively and safely. We'll explore when caching makes sense, the critical differences between local and external caches, the nuances of inline versus side caches, how to design cache expiration policies that balance freshness with resilience, and how to address the many other considerations that make caching challenging.
+
+## When We Use Caching
+
+Several factors lead us to consider adding a cache to our systems. Understanding when caching is appropriate—and when it isn't—is the first critical decision.
+
+### Latency and Efficiency Concerns
+
+Caching becomes attractive when we observe specific performance or capacity issues:
+
+**Dependency latency at scale**: A dependency might work fine at low request rates, returning results in acceptable timeframes. But as anticipated load increases, response times degrade. Perhaps the dependency performs complex queries that don't scale linearly, or it has resource constraints that cause queueing at higher throughput.
+
+**Approaching throttling limits**: Dependencies might be approaching their throttling limits under anticipated load. Rather than requesting higher limits (which might be expensive or operationally complex), caching can reduce the request rate to sustainable levels.
+
+**Hot-key and hot-partition problems**: Uneven request patterns can lead to hot-key or hot-partition throttling. If 80% of requests hit 20% of the data (or worse, if a single key receives massive traffic), caching those hot items can dramatically reduce load on the underlying data store.
+
+### Cache Hit Ratio: The Critical Question
+
+Before implementing a cache, we must answer a fundamental question: **Will this cache actually get used across multiple requests?**
+
+Data from dependencies must be a good caching candidate. Results should be **reusable across multiple requests or operations**. This means:
+
+**Shared data**: Multiple requests need the same data. If Request A fetches user profile data, and Requests B, C, and D also need that same profile, caching makes sense.
+
+**Stable data**: Data doesn't change so frequently that cached values are always stale by the time they're reused. If data changes on every request, caching provides no benefit.
+
+**Predictable access patterns**: Some data is accessed more frequently than other data, creating opportunities for caching hot data.
+
+If each request requires unique queries to the dependent service with unique-per-request results, the cache hit rate will be negligible. You'll pay the operational cost of running a cache while receiving no benefit—or worse, adding latency because of the extra cache check before every dependency call.
+
+<Callout type="tip">
+**Measure before implementing**: Before adding a cache, measure your potential hit rate. Log or sample what data is being fetched. Calculate how often the same data is requested within your intended TTL window. If potential hit rate is below 50%, reconsider whether caching is appropriate.
+</Callout>
+
+### Eventual Consistency Tolerance
+
+The third critical question: **How tolerant are your service and clients to eventual consistency?**
+
+Cached data necessarily grows inconsistent with the source over time. From the moment data is cached, it begins to diverge from the source of truth:
+
+- If the source updates but the cache isn't invalidated, the cache serves stale data
+- If multiple caches exist (local caches on different servers), they can diverge from each other
+- If cache updates fail partially, some caches have new data while others have old data
+
+Caching can only succeed if both your service and its clients compensate accordingly for this eventual consistency.
+
+**Understanding the staleness window**:
+
+The rate of change of source data, combined with the cache refresh policy, determines how inconsistent data tends to be:
+
+```
+Maximum Staleness = Cache TTL
+
+For example:
+- TTL = 5 seconds → Maximum staleness of 5 seconds
+- TTL = 5 minutes → Maximum staleness of 5 minutes
+- TTL = 1 hour → Maximum staleness of 1 hour
+```
+
+**Questions to ask**:
+
+- Can clients tolerate seeing user profile data that's 30 seconds old? 5 minutes old?
+- If configuration data is cached for 5 minutes, what's the impact of different servers using different versions during those 5 minutes?
+- If pricing data is cached, what's the business impact of showing the wrong price?
+- If authorization data is cached, what's the security impact of granting or denying access based on stale information?
+
+**Relationship between TTL and data change rate**:
+
+These factors are closely related. Relatively static or slow-changing data can be cached for longer periods:
+
+| Data Type | Change Frequency | Typical TTL |
+|-----------|-----------------|-------------|
+| **Static reference data** | Days/weeks | Hours |
+| **Configuration** | Hours | Minutes |
+| **User profiles** | Minutes/hours | Seconds/minutes |
+| **Real-time data** | Seconds | Not cacheable |
+
+<Callout type="info">
+**Cache Evaluation Framework**: Before implementing a cache, validate that: (1) Data can be reused across requests (high hit rate potential), (2) Clients tolerate staleness for the chosen TTL, (3) The cache actually solves a real latency/cost/availability problem, and (4) The benefits outweigh the operational complexity and risks.
+</Callout>
+
+## Local In-Memory Caches
+
+On-box caches, commonly implemented in process memory, are quick and easy to implement and can provide significant improvements with minimal work. They're often the first approach considered once caching needs are identified.
+
+### Advantages of Local Caches
+
+**No additional operational overhead**: In-memory caches don't require deploying, monitoring, or scaling separate infrastructure. They exist purely in your application's memory space.
+
+**Relatively low-risk integration**: Because there's no additional infrastructure to fail, in-memory caches are fairly low-risk to add to an existing service. If the cache doesn't work as expected, you can simply remove the code.
+
+**Fast access**: Data is in local memory—no network calls required. Access times are measured in microseconds rather than milliseconds.
+
+**Simple implementation**: An in-memory cache is often just a hash table managed through application logic:
+
+```python
+cache = {}  # Simple in-memory cache
+
+def get_user_profile(user_id):
+    if user_id in cache:
+        return cache[user_id]  # Cache hit
+
+    profile = fetch_from_database(user_id)
+    cache[user_id] = profile
+    return profile
+```
+
+Alternatively, caching can be embedded in service clients (like using a caching HTTP client that automatically caches responses based on HTTP headers).
+
+### Disadvantages of Local Caches
+
+Despite the benefits and seductive simplicity of in-memory caches, they come with several significant downsides that must be carefully considered.
+
+#### 1. Cache Coherence Problems
+
+Cached data will be **inconsistent from server to server** across your fleet. Each server maintains its own independent cache, leading to cache coherence issues:
+
+**The scenario**:
+1. Server A caches User Profile for ID 123 at time T0
+2. Server B caches the same profile at time T1
+3. The user updates their profile at time T2
+4. Server A's cache doesn't know about the update
+5. Server B's cache doesn't know about the update
+6. Requests to Server A see old data until its cache entry expires
+7. Requests to Server B see old data until its cache entry expires
+8. But Server A and B might have cached at different times, so they expire at different times
+9. The same user making repeated requests sees inconsistent data depending on which server handles each request
+
+This manifests as confusing behavior for clients:
+
+**Client experience**:
+- Request 1 (routed to Server A) → Returns profile version 1 (cached)
+- Request 2 (routed to Server B) → Returns profile version 2 (happened to cache more recently)
+- Request 3 (routed to Server A) → Returns profile version 1 again (still cached)
+
+The client sees data moving backward and forward in time depending on request routing.
+
+<Mermaid title="Cache Coherence Issue: Different Servers Hold Different Values" chart={`graph TD
+    R1[Request 1] --> S1[Server 1<br/>Cache: User123 v1]
+    R2[Request 2] --> S2[Server 2<br/>Cache: User123 v2]
+    R3[Request 3] --> S1
+
+    S1 --> D[Downstream<br/>Database]
+    S2 --> D
+
+    style S1 fill:#e3f2fd,color:#1a1a1a
+    style S2 fill:#fff3e0,color:#1a1a1a
+`} />
+
+**Cache coherence issue**: Different servers hold different cached values for the same user, so identical requests can return different data depending on which server they land on.
+
+**When this is acceptable**: If your service and clients can tolerate eventual consistency and data going backward in time occasionally, cache coherence problems might be acceptable. Many read-heavy workloads with infrequent updates can tolerate this.
+
+**When this is problematic**: If clients expect monotonically increasing data (like a counter), or if seeing old data after seeing new data causes incorrect behavior, cache coherence becomes a serious problem.
+
+#### 2. Downstream Load Proportional to Fleet Size
+
+As your service fleet grows, downstream load from cache misses remains proportional to fleet size, potentially overwhelming dependent services.
+
+**The math**:
+
+```
+Downstream Load = Fleet Size × Miss Rate × Request Rate per Server
+
+Example:
+- 10 servers, 20% miss rate, 100 req/sec per server
+- Downstream load = 10 × 0.20 × 100 = 200 req/sec
+
+If fleet doubles to 20 servers:
+- Downstream load = 20 × 0.20 × 100 = 400 req/sec
+
+Even with 80% cache hit rate, downstream load doubled!
+```
+
+**Why this happens**: Each server's cache is independent. When Server 1 caches an item, that doesn't help Server 2. Both servers will cache miss and fetch from the downstream service independently.
+
+**When this becomes problematic**: As your fleet scales, you can overwhelm dependencies that were appropriately sized for original load but can't handle the scaled load. You thought caching would solve your scaling problem, but it only delayed it.
+
+**Monitoring this issue**: We've found that an effective way to monitor this is to **emit metrics on cache hits/misses** and the **number of requests made to downstream services**. Graph these over time alongside fleet size. If downstream request rate grows linearly with fleet size despite good hit rates, you have this problem.
+
+#### 3. Cold Start Issues
+
+New servers launch with completely empty caches, causing bursts of requests to dependent services as they fill their caches. This can be significant during deployments or other circumstances where caches are flushed fleet-wide.
+
+**The cold start scenario**:
+
+1. Deploy new code to 100 servers
+2. All servers restart with empty caches
+3. Requests start flowing to the new servers
+4. Every request is a cache miss initially
+5. All 100 servers simultaneously fetch the same popular items from dependencies
+6. Downstream services experience a massive spike in load
+7. This can cause throttling or even outages in dependencies
+
+**Fleet-wide deployment magnifies the problem**:
+- 10% deployment (10 servers) → 10 servers with cold caches
+- 50% deployment (50 servers) → 50 servers with cold caches
+- 100% deployment (all servers) → Every server has a cold cache
+
+Large deployments can create thundering herd scenarios where hundreds of servers simultaneously fetch the same data.
+
+**Partial mitigation strategies**:
+- **Gradual deployments**: Deploy to a small percentage of fleet at a time
+- **Cache warming**: Pre-populate caches before serving traffic
+- **Request coalescing**: Coordinate requests for the same data (described in detail later)
+
+Cache coherence and empty cache issues can often be addressed by using **request coalescing**, which we'll explore in depth later in this lesson.
+
+## External Caches
+
+External caches store cached data in a separate fleet running caching software like Memcached, Redis, or Valkey. This architectural shift addresses many of the issues inherent in local in-memory caches but introduces its own set of challenges.
+
+### Advantages of External Caches
+
+**Cache coherence improved**: An external cache holds the value used by all servers in the fleet, dramatically reducing coherence issues. When one server updates the cache, all servers immediately see the new value on their next fetch.
+
+Note: Coherence issues aren't totally eliminated. There can still be failure cases when updating the cache—perhaps an update fails partway through, or different servers update different parts of the cache at slightly different times. But the problem is far less severe than with in-memory caches.
+
+**Reduced downstream load**: Overall load on downstream services is significantly reduced compared to in-memory caches and critically **isn't proportional to fleet size**.
+
+```
+With external cache:
+Downstream Load = Cache Miss Rate × Total Request Rate
+
+Example:
+- 10% miss rate, 10,000 req/sec total
+- Downstream load = 0.10 × 10,000 = 1,000 req/sec
+
+If service fleet doubles (still 10,000 req/sec total):
+- Downstream load stays at 1,000 req/sec
+```
+
+The cache fleet absorbs the scaling burden instead of the downstream service.
+
+**No cold start during deployments**: The external cache remains populated throughout service deployments. When new servers start, they immediately benefit from the warm cache, avoiding the cold start thundering herd.
+
+**More storage space**: External cache fleets can have far more memory than individual service servers, reducing cache eviction due to space constraints. A server might have 8GB of memory total (with most used by the application), while a dedicated cache node might have 64GB or more purely for caching.
+
+### Disadvantages of External Caches
+
+However, external caches come with their own set of substantial challenges that must be carefully addressed.
+
+#### 1. Operational Complexity
+
+**Additional fleet to manage**: You now have an additional fleet to deploy, monitor, manage, and scale. This includes:
+
+- Provisioning cache nodes
+- Configuring cache software (Memcached, Redis, Valkey, etc.)
+- Setting up monitoring and alarms
+- Planning for capacity
+- Handling failures and recovery
+- Performing upgrades
+- Managing configuration changes
+
+**Different availability characteristics**: The cache fleet will have different availability characteristics than the dependent service it's caching for. The cache fleet can often be **less available** because:
+
+- It might not have support for zero-downtime upgrades
+- It might require maintenance windows for software updates
+- Cache software can have bugs or failure modes different from your service
+- Network issues can partition the cache fleet from your service fleet
+
+#### 2. Handling Cache Unavailability
+
+To prevent service availability from being degraded due to external cache issues, we must add service code to deal with various failure scenarios:
+
+**Cache fleet unavailability**: The entire cache fleet is down or unreachable.
+
+**Cache node failure**: Individual nodes in the cache fleet fail.
+
+**Cache operation failures**: Individual put/get operations fail due to timeouts, errors, or other issues.
+
+**The naive fallback strategy**: Simply fall back to calling the dependent service when cache is unavailable:
+
+```python
+def get_user_profile(user_id):
+    try:
+        return external_cache.get(user_id)
+    except CacheUnavailable:
+        return fetch_from_database(user_id)  # Fallback
+```
+
+**Why this is dangerous**: During an extended cache outage, this causes an **atypical spike in traffic** to the downstream service:
+
+1. Cache goes down at time T0
+2. Every request is now a cache miss
+3. All requests fall back to the database
+4. Database was sized for 10% of traffic (90% hit rate in cache)
+5. Database now receives 100% of traffic—a 10x increase
+6. Database throttles or browns out
+7. Your service starts failing because the database can't handle the load
+8. Availability is reduced—the opposite of what caching was supposed to provide
+
+<Callout type="warning">
+**Cache Dependency Risk**: If your service can't function without the cache, the cache has become a critical dependency. Any cache outage becomes a service outage. This is often worse than not having a cache at all, because you've created a new single point of failure.
+</Callout>
+
+**Amazon's preferred approaches**:
+
+**Option 1: External cache with in-memory fallback**
+
+Use external cache normally, but maintain a small in-memory cache as fallback:
+
+```python
+def get_user_profile(user_id):
+    # Try external cache first
+    try:
+        return external_cache.get(user_id)
+    except CacheUnavailable:
+        # Fallback to local cache
+        if user_id in local_cache:
+            return local_cache[user_id]
+        # Only hit database if not in either cache
+        return fetch_from_database(user_id)
+```
+
+This provides degraded but functional behavior during external cache outages.
+
+**Option 2: Load shedding and rate capping**
+
+Cap the maximum rate of requests sent to the downstream service:
+
+```python
+database_rate_limiter = RateLimiter(max_rate=1000)  # Cap at 1000 req/sec
+
+def get_user_profile(user_id):
+    try:
+        return external_cache.get(user_id)
+    except CacheUnavailable:
+        if database_rate_limiter.allow_request():
+            return fetch_from_database(user_id)
+        else:
+            return error_response("Service temporarily degraded")
+```
+
+This trades some availability (shedding load when over cap) to prevent total outages from browning out dependencies.
+
+**Option 3: Serve stale data**
+
+Continue serving stale cached data even during outages (using techniques like soft/hard TTL described later).
+
+**Testing the fallback**: We test service behavior with caching disabled to validate that the safeguards we've put in place actually work as expected. This testing should be done regularly (not just once during initial development) to ensure:
+
+- Fallback mechanisms still work after code changes
+- Dependencies can actually handle the load
+- Monitoring and alarms properly detect the scenario
+- Runbooks for cache outages are accurate
+
+#### 3. Scaling and Elasticity
+
+As the cache fleet begins to reach its request rate or memory limits, nodes will need to be added. This process has subtleties that can cause outages if not handled carefully.
+
+**Determine leading indicators**: Which metrics are leading indicators of limits? Set up monitors and alarms accordingly.
+
+Example from Amazon: "On a service I recently worked on, our team found that CPU utilization got very high as the Redis request rate reached its limit. We used load testing with realistic traffic patterns to determine the limit and find the right alarm threshold."
+
+**Common leading indicators**:
+- CPU utilization (for request rate limits)
+- Memory usage (for storage limits)
+- Network throughput
+- Cache eviction rate
+- Request latency
+
+**Scaling challenges**:
+
+As we add capacity to the cache fleet, we must do so in a way that doesn't cause an outage or massive loss of cache data.
+
+**Different technologies have different constraints**:
+
+Some cache servers don't support adding nodes to a cluster without downtime. Redis Cluster supports adding nodes online, but basic Redis master-replica setups might not. However, **ElastiCache Serverless** (available for Valkey and Memcached) automatically handles scaling capacity without manual node management, eliminating many of these operational challenges.
+
+**Consistent hashing requirements**: Not all cache client libraries provide consistent hashing, which is necessary to add nodes to the cache fleet and redistribute cached data without losing most of the cache.
+
+**What is consistent hashing?**
+
+Traditional hashing: `node = hash(key) % num_nodes`
+- If `num_nodes` changes, almost every key maps to a different node
+- Adding one node invalidates most of the cache
+
+Consistent hashing: Uses a ring structure where adding nodes only affects keys near the new node
+- Adding one node invalidates only ~1/N of cached data
+- Much less disruptive
+
+**Why this matters**:
+
+Without consistent hashing, adding nodes to a 10-node cache:
+- Traditional hashing: ~90% of keys remap to different nodes → ~90% cache miss rate spike
+- Consistent hashing: ~10% of keys remap → ~10% cache miss rate increase
+
+Due to the variability in client implementations of consistent hashing and the discovery of nodes in the cache fleet, we **thoroughly test adding and removing cache servers before going to production**:
+
+- Add a node and verify keys are redistributed correctly
+- Remove a node and verify keys redistribute
+- Simulate node failure and verify recovery
+- Test client behavior when node list updates
+
+#### 4. Storage Format Evolution
+
+With an external cache, we take extra care to ensure robustness as the storage format changes. **Cached data must be treated as if it were in a persistent store**.
+
+**Why this matters**: The cache sits between your service code and the data source. Different versions of your service code might be running simultaneously (during deployments), and they all interact with the same cache.
+
+**Requirements for safe format evolution**:
+
+**Forward compatibility**: Updated software can read data that a previous version wrote.
+
+Example:
+```python
+# Version 1 writes: {"name": "Alice", "age": 30}
+# Version 2 must be able to read this format
+```
+
+**Backward compatibility**: Older versions can gracefully handle seeing new formats/fields.
+
+Example:
+```python
+# Version 2 writes: {"name": "Alice", "age": 30, "email": "alice@example.com"}
+# Version 1 must not crash when it sees the "email" field
+```
+
+This is critical during deployments when the fleet has a mix of old and new code:
+- New servers write new format to cache
+- Old servers read from cache and must handle new format
+- Gradually all servers upgrade
+- Eventually only new format is in use
+
+**Preventing poison pills**: Preventing uncaught exceptions when unexpected formats are encountered is necessary to prevent poison pills—cached values that crash any server that tries to use them.
+
+```python
+def deserialize_user_profile(cached_data):
+    try:
+        profile = json.loads(cached_data)
+        # Validate expected fields exist
+        if "name" not in profile or "age" not in profile:
+            logging.warning("Invalid cached profile format, ignoring")
+            return None
+        return profile
+    except json.JSONDecodeError:
+        logging.warning("Failed to parse cached profile, ignoring")
+        return None
+```
+
+**However, this isn't sufficient to prevent all format-related problems**:
+
+Detecting a version format mismatch and discarding the cached data can lead to **mass refreshes of caches**, which can lead to dependent service throttling or brownouts.
+
+Scenario:
+1. Deploy new version that changes cache format
+2. New servers detect old format and discard it
+3. All new servers simultaneously fetch fresh data from database
+4. Database is overwhelmed
+5. Outage occurs
+
+**Better approach**: Support reading both old and new formats during transition:
+
+```python
+def deserialize_user_profile(cached_data):
+    profile = json.loads(cached_data)
+
+    # Check version field
+    if "version" not in profile:
+        # Old format (version 1), upgrade to new format
+        return upgrade_v1_to_v2(profile)
+    elif profile["version"] == 2:
+        return profile
+    else:
+        # Unknown version, discard
+        return None
+```
+
+Serialization format issues are covered in greater depth in the "Ensuring Rollback Safety During Deployments" article from Amazon Builders' Library.
+
+#### 5. Concurrent Updates and Consistency
+
+A final consideration for external caches is that they are updated by individual nodes in the service fleet. Caches typically don't have features like conditional puts and transactions (unlike databases).
+
+**The race condition scenario**:
+
+```
+Time T0: Server A reads from cache (miss) for User 123
+Time T1: Server B reads from cache (miss) for User 123
+Time T2: Server A fetches from database → gets version 1
+Time T3: Server B fetches from database → gets version 2 (data was updated)
+Time T4: Server A writes version 1 to cache
+Time T5: Server B writes version 2 to cache
+Result: Correct (version 2 is in cache)
+
+But if timing changes slightly:
+Time T4: Server B writes version 2 to cache
+Time T5: Server A writes version 1 to cache
+Result: WRONG (version 1 is in cache, but version 2 is newer)
+```
+
+**Why this is tricky**: Without transactions or conditional writes, you can't guarantee that writes happen in the correct order.
+
+**Mitigations**:
+
+**Option 1: Accept eventual consistency**: Understand that caches might temporarily have stale data, and this is okay for your use case.
+
+**Option 2: Include timestamps/versions**:
+```python
+def update_cache(key, value, version):
+    # Some cache systems support compare-and-set
+    cache.set_if_version_greater(key, value, version)
+```
+
+**Option 3: Invalidate instead of update**:
+```python
+def update_data(user_id, new_data):
+    database.update(user_id, new_data)
+    cache.delete(user_id)  # Invalidate, don't update
+    # Next read will fetch fresh data from database
+```
+
+We take care to ensure that cache updating code is correct and can never leave the cache in an invalid or inconsistent state.
+
+## Inline vs. Side Caches
+
+Another decision we need to make when evaluating different caching approaches is the choice between inline and side caches. This architectural decision has significant implications for how caching integrates with your service.
+
+### Inline Caches (Read-Through/Write-Through)
+
+Inline caches, also called read-through or write-through caches, embed cache management into the main data access API, making cache management an **implementation detail** of that API.
+
+**How it works**:
+
+From the client's perspective, they call a single API:
+```python
+profile = user_service.get_profile(user_id)
+```
+
+Behind the scenes, the implementation handles caching:
+```python
+def get_profile(user_id):
+    # Check cache
+    if cached := cache.get(user_id):
+        return cached
+
+    # Cache miss, fetch from source
+    profile = database.fetch(user_id)
+
+    # Populate cache
+    cache.set(user_id, profile)
+
+    return profile
+```
+
+**Examples of inline caches**:
+
+**Application-specific**: Amazon DynamoDB Accelerator (DAX) sits in front of DynamoDB and provides caching that's completely transparent to applications. You point your application at DAX instead of DynamoDB, and DAX handles caching automatically.
+
+**Standards-based**: HTTP caching is a classic inline cache. HTTP headers (Cache-Control, ETag, etc.) control caching behavior, and caching can happen at multiple layers:
+- Browser cache
+- CDN (Content Delivery Network)
+- Reverse proxy (Nginx, Varnish)
+- Forward proxy
+- HTTP client library cache
+
+All of this happens transparently based on HTTP headers. Application code doesn't manage the cache.
+
+### Benefits of Inline Caches
+
+**Uniform API model for clients**: Clients don't need to know whether they're hitting a cache or the underlying data source. The interface is identical.
+
+**Caching can be added/removed/tweaked without client changes**: You can:
+- Add caching without changing clients
+- Remove caching if it's not working
+- Adjust TTLs and policies
+- Switch between cache technologies
+
+All without touching client code.
+
+**Eliminates potential bugs in application cache management**: If cache management is in the data access layer, application code can't make mistakes like:
+- Forgetting to check the cache
+- Updating data but forgetting to invalidate cache
+- Using the wrong cache key
+
+**Numerous off-the-shelf options**: For HTTP caching especially, there are many proven implementations:
+- In-memory libraries
+- Standalone proxies (Nginx, Varnish, Squid)
+- Managed services (CloudFront, CloudFlare, Fastly)
+
+### Downsides of Inline Caches
+
+**External caches become part of the availability equation**: If you have a Varnish fleet that caches requests from an external REST service, then if that caching fleet goes down, from your service's perspective it's as if the dependency itself went down.
+
+There's no opportunity for the client to compensate for a temporarily unavailable cache. The client just sees failed requests.
+
+**Transparency can hide problems**: Because caching is transparent, clients might not realize they're hitting stale data, and might not have visibility into cache hit rates or performance.
+
+**Must be built into the protocol or service**: Inline caching isn't an option unless:
+- The protocol supports it (like HTTP)
+- The service provides it (like DAX for DynamoDB)
+- You build it yourself (custom caching proxy or integrated client)
+
+If an inline cache for your protocol isn't available, you'll need significant development effort to create one.
+
+### Side Caches
+
+Side caches are generic object stores like Amazon ElastiCache (Memcached, Redis, and Valkey) or libraries like Ehcache and Google Guava for in-memory caches.
+
+Amazon ElastiCache now supports Valkey alongside Memcached and Redis. Valkey is the recommended open-source option going forward, as it emerged as the community fork after Redis changed its licensing model. AWS adopted Valkey to continue providing a truly open-source caching solution.
+
+For teams looking to simplify cache fleet management, **ElastiCache Serverless** automatically scales capacity based on demand and eliminates the need to manually provision, configure, or manage cache nodes. This addresses the cache fleet scaling challenges discussed earlier in this lesson, as the service handles capacity adjustments transparently without requiring consistent hashing implementations or manual node additions.
+
+**How it works**:
+
+Application code directly manipulates the cache before and after calls to the data source:
+
+```python
+def get_user_profile(user_id):
+    # Check cache
+    cached = redis.get(f"profile:{user_id}")
+    if cached:
+        return json.loads(cached)
+
+    # Cache miss, fetch from source
+    profile = database.fetch_profile(user_id)
+
+    # Update cache
+    redis.set(f"profile:{user_id}", json.dumps(profile), ex=300)  # 5 min TTL
+
+    return profile
+```
+
+The application code explicitly:
+1. Checks the cache before making downstream calls
+2. Fetches from the data source on cache miss
+3. Puts the result in the cache after fetching
+
+### Benefits of Side Caches
+
+**Full control over cache behavior**: You can implement sophisticated caching strategies:
+- Different TTLs for different data types
+- Conditional caching based on data characteristics
+- Complex invalidation logic
+- Custom serialization
+
+**Can implement sophisticated fallback strategies**: When cache is unavailable, you have full control:
+- Fall back to local cache
+- Serve stale data
+- Shed load
+- Return errors
+
+**Works with any data source**: You can cache data from any source—databases, REST APIs, gRPC services, file systems, etc. You're not limited to sources that have inline caching support.
+
+### Downsides of Side Caches
+
+**Cache management logic in application code**: This creates opportunities for bugs:
+- Forgetting to check the cache
+- Checking the cache but using the wrong key
+- Updating data without invalidating the cache
+- Cache invalidation in some code paths but not others
+
+**Must be implemented for each use case**: Every team needs to write their own caching logic. Best practices might not be shared across teams.
+
+**Potential for inconsistency**: Different parts of the codebase might cache the same data differently, leading to inconsistent behavior.
+
+## Cache Expiration Policies
+
+Picking the right **cache size**, **expiration policy**, and **eviction policy** is among the most challenging cache implementation details. Getting these wrong can lead to poor cache performance or even outages.
+
+### Time-to-Live (TTL)
+
+The most common expiration policy uses **absolute time-based expiration**—associating a time-to-live (TTL) with each object as it's loaded.
+
+**How TTL works**:
+
+```python
+cache.set(key, value, ttl=300)  # Cache for 300 seconds (5 minutes)
+```
+
+After 300 seconds, the cached value expires. The next request will be a cache miss and will fetch fresh data from the source.
+
+**Choosing the right TTL**: The TTL is chosen based on two primary factors:
+
+**Client tolerance to stale data**: How old can data be before it causes problems?
+- User profile data might be fine being 5 minutes old
+- Pricing data might need to be under 30 seconds old
+- Authorization data might need to be very fresh (< 10 seconds)
+
+**How static the data is**: Slowly changing data can be cached more aggressively.
+- Reference data that changes monthly → TTL of hours or days
+- User preferences that change occasionally → TTL of minutes
+- Real-time metrics → TTL of seconds or not cacheable
+
+<Mermaid title="Choosing Cache TTL Based on Data Change Frequency" chart={`graph TD
+    A[Data Change Frequency] --> B{How often does<br/>data change?}
+    B -->|Rarely<br/>days/weeks| C[Long TTL<br/>hours/days]
+    B -->|Occasionally<br/>hours| D[Medium TTL<br/>minutes]
+    B -->|Frequently<br/>minutes| E[Short TTL<br/>seconds]
+    B -->|Constantly<br/>seconds| F[Don't Cache<br/>or very short TTL]
+
+    style C fill:#4caf50,color:#fff
+    style D fill:#ffeb3b,color:#1a1a1a
+    style E fill:#ff9800,color:#fff
+    style F fill:#f44336,color:#fff
+`} />
+
+### Cache Size and Eviction
+
+**Ideal cache size** is based on a model of:
+- Anticipated volume of requests
+- Distribution of cached objects across those requests
+- Ensuring high cache hit rate with these traffic patterns
+
+**Example calculation**:
+
+```
+Assumptions:
+- 1000 requests/sec
+- 100 unique users per second
+- User profile is 10KB
+- Want to cache profiles for 5 minutes (300 seconds)
+
+Maximum unique users in 5 minutes = 100 users/sec × 300 sec = 30,000 users
+Cache size needed = 30,000 users × 10KB = 300MB
+```
+
+Add headroom (2x) to account for variance: **600MB cache size**
+
+**The most common eviction policy is Least Recently Used (LRU)**:
+
+When the cache is full and a new item needs to be added:
+1. Find the least recently used item in the cache
+2. Evict it
+3. Add the new item
+
+LRU works well because items that haven't been accessed recently are less likely to be accessed soon.
+
+### Validating in Production
+
+Real-world traffic patterns can differ dramatically from what we model, so we track the actual performance of our cache.
+
+**Our preferred metrics**:
+- **Cache hits and misses**: What percentage of requests hit the cache?
+- **Total cache size**: How much memory is being used?
+- **Number of requests to downstream services**: Is downstream load actually reduced?
+- **Cache eviction rate**: How often are items evicted to make room?
+
+**What good metrics tell you**:
+
+```
+High hit rate (>80%) + Low downstream requests = Cache is working well
+Low hit rate (&lt;50%) + High downstream requests = Cache is not effective
+High eviction rate + Low hit rate = Cache is too small
+```
+
+<Callout type="warning">
+**Deliberate Configuration Required**: Avoid arbitrarily picking cache size and TTL during initial implementation and never validating appropriateness. Amazon has seen this lack of follow-through lead to temporary service outages and exacerbation of ongoing outages. Set explicit goals for cache hit rates and monitor whether you're achieving them.
+</Callout>
+
+### Soft TTL and Hard TTL Pattern
+
+To improve resiliency when downstream services are unavailable, Amazon uses **two TTLs**:
+
+**Soft TTL**: The client attempts to refresh cached items at this interval under normal circumstances.
+
+**Hard TTL**: If the downstream service is unavailable or doesn't respond, continue using existing cache data until this limit is reached.
+
+**How it works**:
+
+```python
+class CacheEntry:
+    def __init__(self, value, soft_ttl, hard_ttl):
+        self.value = value
+        self.cached_at = time.now()
+        self.soft_ttl = soft_ttl
+        self.hard_ttl = hard_ttl
+
+def get_with_soft_ttl(key):
+    entry = cache.get(key)
+
+    if not entry:
+        # Cache miss
+        return fetch_and_cache(key)
+
+    age = time.now() - entry.cached_at
+
+    if age < entry.soft_ttl:
+        # Fresh enough, use cached value
+        return entry.value
+
+    if age < entry.hard_ttl:
+        # Past soft TTL but under hard TTL
+        # Try to refresh, but use cached value if refresh fails
+        try:
+            return fetch_and_cache(key)
+        except DownstreamUnavailable:
+            logging.info("Using stale cache due to downstream unavailable")
+            return entry.value
+
+    # Past hard TTL, must fetch fresh
+    return fetch_and_cache(key)
+```
+
+**Example**: The AWS IAM client uses this pattern. It tries to refresh IAM policy data every minute (soft TTL), but if IAM is unavailable, it continues using cached policy data for up to 15 minutes (hard TTL).
+
+This means during a 10-minute IAM outage:
+- Services continue functioning with slightly stale authorization data
+- Instead of complete outage, services experience temporary staleness
+- Availability is maintained at the cost of consistency
+
+### Backpressure Pattern with TTL
+
+Amazon combines the soft/hard TTL approach with backpressure to reduce the impact of downstream brownouts:
+
+**How it works**:
+
+1. Downstream service detects it's browning out (high load, high latency)
+2. Downstream service responds with a **backpressure event** (special header or error code)
+3. Calling service receives backpressure indication
+4. Calling service uses cached data until hard TTL
+5. Calling service only makes requests for data not in its cache
+6. Calling service continues until downstream removes backpressure
+
+```python
+def fetch_with_backpressure(key):
+    entry = cache.get(key)
+
+    try:
+        response = downstream.fetch(key)
+
+        # Check for backpressure signal
+        if response.headers.get("X-Backpressure"):
+            # Downstream is struggling, prefer cache
+            if entry and age(entry) < entry.hard_ttl:
+                logging.info("Using cached value due to backpressure")
+                return entry.value
+
+        # Normal response, update cache
+        return cache_and_return(key, response)
+
+    except DownstreamError:
+        if entry and age(entry) < entry.hard_ttl:
+            return entry.value
+        raise
+```
+
+**Why this helps**: The downstream service can recover from brownout while maintaining availability of upstream services. Instead of upstream services hammering the struggling downstream with refresh requests, they back off and use cached data.
+
+## Other Critical Considerations
+
+Beyond the core architectural decisions, several other considerations are critical for safe and effective caching.
+
+### Error Caching (Negative Caching)
+
+What should the cache behavior be when errors are received from the downstream service?
+
+**Option 1: Use last cached good value** (leverage soft/hard TTL pattern)
+
+```python
+try:
+    fresh_value = fetch_from_downstream(key)
+    cache.set(key, fresh_value)
+    return fresh_value
+except DownstreamError:
+    cached = cache.get(key)
+    if cached:
+        return cached  # Use stale value
+    raise  # No cached value available, propagate error
+```
+
+**Option 2: Cache the error response** (negative cache)
+
+Use a different TTL for error responses than for successful responses, and propagate the error to the client:
+
+```python
+try:
+    value = fetch_from_downstream(key)
+    cache.set(key, value, ttl=300)  # Cache success for 5 minutes
+    return value
+except NotFoundError as e:
+    cache.set(key, ErrorMarker(e), ttl=60)  # Cache error for 1 minute
+    raise
+```
+
+**Why negative caching matters**: If downstream is temporarily unavailable or unable to fulfill certain requests (for example, when a downstream resource is deleted), the upstream service will continue to bombard it with traffic.
+
+**The scenario without negative caching**:
+
+1. Client requests User ID 999 (doesn't exist)
+2. Service checks cache → miss
+3. Service requests from database → 404 Not Found
+4. Service doesn't cache the error
+5. Service returns 404 to client
+6. Client retries immediately
+7. Service checks cache → miss (nothing was cached)
+8. Service requests from database again → 404 Not Found
+9. Repeat indefinitely
+
+If many clients do this simultaneously, or one client retries in a loop, the database gets hammered with requests for data that doesn't exist.
+
+**With negative caching**:
+
+1. Client requests User ID 999 (doesn't exist)
+2. Service checks cache → miss
+3. Service requests from database → 404 Not Found
+4. Service caches the 404 for 60 seconds
+5. Service returns 404 to client
+6. Client retries immediately
+7. Service checks cache → hit (404 is cached)
+8. Service returns 404 without hitting database
+9. Database is protected
+
+<Callout type="warning">
+**Critical Requirement**: Ensure **something is in the cache for error cases**. If this is not the case and downstream is temporarily unavailable, the upstream service will continue to bombard it with traffic and potentially either cause an outage or exacerbate an existing one. We have seen real-world examples where failure to cache negative responses led to increased failure rates and faults.
+</Callout>
+
+**Choosing the approach**: The choice depends on:
+- Is stale data better or worse than errors for your use case?
+- Can clients handle seeing stale data after seeing fresh data?
+- Are errors transient (prefer stale data) or persistent (prefer negative caching)?
+
+Often the best approach is a **combination**: Use stale data for transient errors within hard TTL, but use negative caching for persistent errors like "not found."
+
+### Security Considerations
+
+When introducing a cache to a service, we evaluate and mitigate any additional security risks it introduces.
+
+#### Encryption Requirements
+
+External caching fleets often lack encryption for:
+- **Serialized data at rest**: Data in cache memory isn't encrypted
+- **Transport-level security**: Data traveling between service and cache isn't encrypted
+
+This is especially important if **sensitive user information** is retained in the cache.
+
+**Examples of sensitive data**:
+- User passwords or credentials
+- Personal information (addresses, phone numbers, emails)
+- Payment information
+- Medical records
+- Any PII (Personally Identifiable Information)
+
+**Mitigations**:
+
+Use managed cache services with encryption support:
+- **Amazon ElastiCache for Redis/Valkey** supports both in-transit encryption (TLS) and at-rest encryption
+- Configure encryption when creating the cache cluster
+- Ensure clients connect using TLS
+
+For other cache systems:
+- Encrypt data before putting it in cache
+- Use VPC isolation to protect network traffic
+- Apply principle of least privilege to cache access
+
+#### Cache Poisoning Attacks
+
+Caches are susceptible to poisoning attacks, in which a vulnerability in the downstream protocol allows an attacker to populate a cache with a value under their control.
+
+**Why this is dangerous**: Cache poisoning amplifies the impact of an attack. Instead of affecting one request, the malicious value remains in the cache, affecting all requests while it's cached.
+
+**Example scenario**:
+
+1. Attacker exploits vulnerability to inject malicious data
+2. Service caches the malicious data
+3. All subsequent requests receive the malicious data
+4. Attack affects thousands of users until cache expires
+
+**Mitigations**:
+- Validate all data before caching
+- Use authenticated and encrypted connections to downstream services
+- Implement cache key namespacing to prevent key collisions
+- Monitor for unusual cache contents
+- Have procedures to flush cache if poisoning is detected
+
+#### Side-Channel Timing Attacks
+
+Caches are susceptible to side-channel timing attacks. Cached values are returned faster than uncached values, so an attacker can use response time to gain information about requests that other clients or tenants are making.
+
+**The attack**:
+
+1. Attacker requests sensitive resource (e.g., admin page)
+2. Measure response time
+3. If fast → Resource was cached → Someone else recently accessed it
+4. If slow → Resource not cached → Likely no one else accessing it
+
+The attacker learns what other users are doing based on timing.
+
+**Example**: In a multitenant system, Tenant A could infer what documents Tenant B is accessing by measuring response times for various document IDs.
+
+**Mitigations**:
+- Separate caches per tenant in multitenant systems
+- Add random jitter to response times
+- Use constant-time operations where possible
+- Monitor for suspicious access patterns
+
+### Thundering Herd and Request Coalescing
+
+The **thundering herd** problem occurs when many clients make requests that need the same uncached downstream resource at approximately the same time.
+
+**Common scenarios**:
+
+**Scenario 1: Cache expiry**: A popular item's cache entry expires. The next 1000 requests all miss and simultaneously fetch from the database.
+
+**Scenario 2: Cold start**: A server starts up with an empty local cache. Many simultaneous requests trigger fetches for the same popular items.
+
+**Scenario 3: Cache invalidation**: A cache is flushed (deployment, maintenance, or deliberate invalidation). The next wave of requests all miss.
+
+**Why this is problematic**:
+
+Instead of one request to the database for User ID 123, there are suddenly 1000 simultaneous requests. This can cause:
+- Database overload and throttling
+- Brownouts in dependencies
+- Cascading failures
+
+**Solution: Request Coalescing**
+
+Ensure only one pending request exists for uncached resources. If multiple requests need the same data concurrently, only one actually fetches it, and the others wait for that result.
+
+<Mermaid title="Request Coalescing: Multiple Cache Misses Share One Backend Fetch" chart={`sequenceDiagram
+    participant R1 as Request 1
+    participant R2 as Request 2
+    participant R3 as Request 3
+    participant Cache
+    participant Downstream
+
+    R1->>Cache: Get(key_A)
+    Cache-->>R1: MISS
+    R1->>Downstream: Fetch(key_A)
+    Note over R1,Downstream: Request in-flight
+
+    R2->>Cache: Get(key_A)
+    Cache-->>R2: MISS
+    Note over R2,Cache: Coalescing: Wait for<br/>in-flight request
+
+    R3->>Cache: Get(key_A)
+    Cache-->>R3: MISS
+    Note over R3,Cache: Coalescing: Wait for<br/>in-flight request
+
+    Downstream-->>R1: Response (value)
+    R1->>Cache: Put(key_A, value)
+
+    Cache-->>R2: value (from coalesced request)
+    Cache-->>R3: value (from coalesced request)
+
+    R1-->>R1: Return value
+    R2-->>R2: Return value
+    R3-->>R3: Return value
+`} />
+
+**Implementation approach**:
+
+```python
+import threading
+
+in_flight_requests = {}
+request_locks = {}
+
+def get_with_coalescing(key):
+    # Check cache first
+    if key in cache:
+        return cache[key]
+
+    # Check if someone else is already fetching this key
+    if key in in_flight_requests:
+        # Wait for their result
+        request_locks[key].wait()
+        # By the time we're unblocked, value should be in cache
+        return cache.get(key)
+
+    # We're the first to request this key
+    lock = threading.Event()
+    request_locks[key] = lock
+    in_flight_requests[key] = True
+
+    try:
+        # Fetch from downstream
+        value = fetch_from_downstream(key)
+
+        # Put in cache
+        cache[key] = value
+
+        # Wake up all waiting requests
+        lock.set()
+
+        return value
+    finally:
+        del in_flight_requests[key]
+        del request_locks[key]
+```
+
+**Where coalescing is available**:
+
+**Some caching libraries provide built-in support**: Many advanced caching libraries include request coalescing/deduplication.
+
+**Some external inline caches provide it**: Nginx and Varnish both support request coalescing (sometimes called "request collapsing").
+
+**Can be implemented on top of existing caches**: As shown in the code example above, you can add coalescing logic around your cache.
+
+**Try it yourself:** Experiment with the interactive simulation below to see how cache stampede and thundering herd problems work in practice.
+
+<QueueSimulator />
+
+## Amazon Best Practices Summary
+
+When introducing a cache, Amazon teams apply these best practices:
+
+### 1. Ensure Legitimate Need
+
+**Justify with data**: The cache must be justified in terms of cost, latency, and/or availability improvements.
+
+**Ensure data is cacheable**: Data must be reusable across multiple client requests. Measure potential hit rates before implementing.
+
+**Be skeptical**: Carefully evaluate that benefits will outweigh the added risks the cache introduces. Caching adds complexity—make sure the value justifies it.
+
+### 2. Plan for Operational Rigor
+
+**Operate with same rigor as the rest of the fleet**: The cache isn't a side project—it's critical infrastructure.
+
+**Emit comprehensive metrics**:
+- Cache utilization (memory usage)
+- Cache hit rate
+- Cache miss rate
+- Requests to downstream services
+- Cache operation latency
+- Cache errors
+
+**Monitor key indicators**:
+- CPU and memory usage on cache nodes
+- Network throughput
+- Cache eviction rate
+- Error rates
+
+**Set up alarms**: Alert on degraded hit rates, high eviction rates, resource exhaustion, errors.
+
+**Validate scaling works**: Make sure the caching fleet can be scaled up without downtime or mass cache invalidation. Test that consistent hashing works as expected.
+
+### 3. Be Deliberate About Configuration
+
+**Empirically choose cache size, expiration policy, and eviction policy**: Don't guess. Use the metrics from #2 to:
+- Determine optimal TTL based on staleness tolerance and data change rate
+- Size cache based on working set and hit rate goals
+- Choose eviction policy (LRU, LFU, etc.) based on access patterns
+
+**Perform tests**: Load test with realistic traffic patterns to validate:
+- Hit rates meet expectations
+- Downstream load is actually reduced
+- Cache can handle peak load
+
+**Validate and tune continuously**: Use metrics to validate choices and tune over time as traffic patterns change.
+
+### 4. Ensure Resilience to Cache Unavailability
+
+Handle various failure scenarios:
+- Cold starts (servers starting with empty caches)
+- Caching fleet outages
+- Changes in traffic patterns (reducing hit rates)
+- Extended downstream outages
+
+**Options for handling unavailability**:
+- Trade some availability to prevent brownouts (load shedding, capping requests)
+- Serve stale data beyond TTL (soft/hard TTL pattern)
+- Fall back to local cache
+- Fail gracefully with degraded functionality
+
+**Load test with caches disabled**: Validate that safeguards actually work. Ensure dependencies can handle the load or that load shedding protects them.
+
+### 5. Consider Security
+
+Evaluate security risks:
+
+**Encryption**: In-transit and at-rest encryption for sensitive data.
+
+**Transport security**: Secure connections when communicating with external caching fleet.
+
+**Cache poisoning**: Validate data before caching, use authenticated connections.
+
+**Side-channel attacks**: Consider timing attacks and use mitigation strategies like cache separation in multitenant systems.
+
+### 6. Design Evolvable Storage Formats
+
+**Use version numbers**: Include a version field in cached objects.
+
+```python
+cached_object = {
+    "version": 2,
+    "name": "Alice",
+    "email": "alice@example.com"
+}
+```
+
+**Write serialization code capable of reading older versions**: Support graceful degradation or upgrading old formats.
+
+**Beware of poison pills**: Prevent serialization bugs from creating cached values that crash servers.
+
+**Test rollback scenarios**: Ensure that if you deploy new code and roll back, the old code can still read caches written by new code.
+
+### 7. Handle Downstream Errors
+
+**Maintain negative cache with distinct TTL**: Cache errors to prevent hammering struggling dependencies.
+
+**Don't cause or amplify outages**: Repeatedly requesting the same downstream resource and discarding error responses can turn partial outages into complete failures.
+
+**Choose error handling strategy**: Decide whether stale data or errors are better for your use case, and implement accordingly.
+
+## Conclusion
+
+Many service teams at Amazon use caching techniques, and the benefits can be substantial—improved latency, reduced costs, and better availability. Despite these benefits, **we don't take the decision to incorporate caching lightly** because the downsides can often outweigh the upsides.
+
+The modal behavior introduced by caching—where system performance depends on cache state—creates risks:
+- Cache addiction (service can't function without the cache)
+- Cache-induced outages (cache failure causes service failure)
+- Operational complexity (another system to manage)
+- Security risks (encryption, poisoning, timing attacks)
+- Subtle bugs (consistency issues, format evolution)
+
+Success with caching requires:
+- **Careful evaluation** before implementing
+- **Deliberate configuration** of size, TTL, and eviction policies
+- **Comprehensive monitoring** and alerting
+- **Resilience to cache unavailability**
+- **Thoughtful error handling**
+- **Security considerations**
+- **Operational discipline**
+
+The patterns and practices described in this lesson represent years of learning from both successes and failures across Amazon and AWS. By applying these carefully and remaining skeptical of the value caching provides, you can gain the benefits while avoiding the pitfalls.
+
+When implemented thoughtfully with proper safeguards, caching is a powerful tool for building scalable, performant systems. When implemented carelessly, it can create new failure modes worse than the original problems. The difference lies in treating caching not as a simple optimization, but as a complex distributed system component that deserves the same engineering rigor as any other critical infrastructure.
+
+<KeyTakeaways>
+- **Cache addiction is real**: Services can become dependent on caches to the point where cache failure causes complete outages. Always test behavior with caching disabled to validate safeguards and ensure dependencies can handle direct load or load shedding protects them.
+- **Local vs. external trade-offs**: In-memory caches are simple but suffer from cache coherence issues, cold starts, and downstream load proportional to fleet size. External caches solve these problems but add operational complexity and availability dependencies.
+- **Soft/Hard TTL pattern improves resilience**: Attempt refresh at soft TTL, but continue using cached data until hard TTL if downstream fails. Combine with backpressure signals to help struggling dependencies recover while maintaining upstream availability.
+- **Cache negative responses**: Failing to cache errors can bombard struggling dependencies with repeated requests for the same data, amplifying outages. Use negative caching with shorter TTLs for error responses.
+- **Request coalescing prevents thundering herd**: Ensure only one pending request exists for uncached resources to prevent synchronized load spikes during cache expirations, cold starts, or invalidations.
+- **Inline vs. side caches have different trade-offs**: Inline caches (like DAX or HTTP caching) provide transparent caching but become availability dependencies. Side caches (like Memcached/Redis/Valkey) provide flexibility but require application-level cache management.
+- **Empirically validate configurations**: Don't set-and-forget cache size and TTL. Use metrics to continuously validate that hit rates meet goals, downstream load is reduced, and cache provides value.
+- **Storage format evolution requires careful planning**: Support both old and new formats during deployments to prevent mass cache invalidation that overwhelms dependencies. Use version fields and backward/forward compatible serialization.
+</KeyTakeaways>

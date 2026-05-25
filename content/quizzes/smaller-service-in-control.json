@@ -1,0 +1,60 @@
+{
+  "lessonSlug": "smaller-service-in-control",
+  "questions": [
+    {
+      "question": "Your data plane (10,000 servers) calls your control plane (100 servers) every 60 seconds for configuration. A bug causes all data plane servers to reset simultaneously and immediately request configuration. What problem occurs?",
+      "options": [
+        "Network bandwidth exhaustion from too many responses",
+        "Correlated requests overwhelm the control plane, causing complete failure",
+        "The load balancer fails because it can't handle the connections",
+        "DynamoDB throttling prevents configuration queries"
+      ],
+      "correctIndex": 1,
+      "explanation": "When clients act in a correlated manner (all requesting simultaneously), the load exceeds the control plane's capacity. With 100:1 scale mismatch, even a small synchronization can push the system beyond its breaking point, causing goodput to drop to zero."
+    },
+    {
+      "question": "You're designing a system where 5,000 data plane servers need configuration that changes every 30 seconds. The control plane has 50 servers. Which architecture is most appropriate?",
+      "options": [
+        "Data plane polls control plane APIs with jittered intervals",
+        "Control plane writes to S3, data plane polls S3 every 30 seconds",
+        "Data plane establishes long-lived connections, control plane pushes updates",
+        "Control plane pushes to data plane servers via direct connections"
+      ],
+      "correctIndex": 2,
+      "explanation": "For frequently changing configuration with low-latency requirements (30-second propagation), S3 polling is too slow and data plane polling risks overload. Decoupling discovery from control flow (data plane connects, control plane pushes) provides both the needed latency and overload protection."
+    },
+    {
+      "question": "Your control plane uses consistent hashing to distribute work across 20 control plane servers managing 10,000 data plane servers. What happens when 5 control plane servers fail simultaneously?",
+      "options": [
+        "50% of data plane servers lose all configuration updates",
+        "The system automatically rebalances work across remaining 15 servers",
+        "All control plane servers must be restarted to rebalance",
+        "The load balancer redistributes connections evenly"
+      ],
+      "correctIndex": 1,
+      "explanation": "With consistent hashing and heartbeat-based discovery, when control plane servers fail, the remaining servers detect the absence of heartbeats and automatically recompute consistent hashing to redistribute the data plane servers across surviving control plane servers."
+    },
+    {
+      "question": "You're using AWS Hyperplane's architecture (control plane writes to S3, data plane polls S3). The control plane experiences a 2-hour outage. What happens to the data plane?",
+      "options": [
+        "Data plane fails immediately when it can't reach control plane",
+        "Data plane continues running with last known configuration (static stability)",
+        "Data plane switches to a backup control plane automatically",
+        "Data plane enters read-only mode and rejects new requests"
+      ],
+      "correctIndex": 1,
+      "explanation": "The S3-based architecture provides static stability—the data plane continues operating with the last known configuration from S3 even during extended control plane outages. This is a key advantage of this pattern."
+    },
+    {
+      "question": "Your data plane has 50,000 servers connecting to a control plane with 50 servers (1000:1 ratio). Even TCP connection establishment is overwhelming the control plane. What pattern should you use?",
+      "options": [
+        "Increase control plane to 500 servers to match the scale",
+        "Use UDP notifications from data plane, control plane initiates TCP connections",
+        "Implement connection pooling to reuse existing connections",
+        "Switch to S3-based architecture exclusively"
+      ],
+      "correctIndex": 1,
+      "explanation": "At extreme scale mismatches (1000:1+), even TCP/TLS handshake costs are prohibitive. Having data plane send lightweight UDP requests and having control plane initiate connections (like EC2's Nitro system) reduces overhead dramatically while maintaining control plane's ability to dictate pace."
+    }
+  ]
+}

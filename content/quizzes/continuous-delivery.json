@@ -1,0 +1,60 @@
+{
+  "lessonSlug": "continuous-delivery",
+  "questions": [
+    {
+      "question": "Your team currently takes 12 days on average from code check-in to production, with 8 days spent waiting for manual approvals and deployment scheduling. Following Amazon's continuous delivery approach, what should be your first priority?",
+      "options": [
+        "Automate the waiting periods by building a pipeline that handles approvals and deployments automatically",
+        "Reduce the time developers spend writing code by using more libraries and frameworks",
+        "Add more manual testing steps to ensure quality isn't sacrificed for speed",
+        "Create multiple release processes optimized for different types of changes"
+      ],
+      "correctIndex": 0,
+      "explanation": "Amazon's experience showed that the biggest gains come from automating the waiting periods—14 of their 16 days were spent waiting. Pipelines that automate approvals and deployments can reduce this dramatically while maintaining quality. Creating multiple release processes (option D) was actually identified as a problem that led to more defects."
+    },
+    {
+      "question": "A team has automated their deployment pipeline but is deploying untested code because their pipeline has no test stages. Leadership wants to mandate minimum test coverage. What is the Amazon approach to enforcing best practices like adequate testing?",
+      "options": [
+        "Immediately block all deployments that don't meet minimum test coverage requirements",
+        "Send monthly emails to team leaders reminding them about testing best practices",
+        "Embed best practice checks in the pipeline with warnings first, then enforce after teams have time to learn and adapt",
+        "Rely on the Ownership principle—teams will naturally add adequate testing when they experience production issues"
+      ],
+      "correctIndex": 2,
+      "explanation": "Amazon mechanizes learning by embedding best practice checks directly in tools engineers use daily. They start with warnings to give teams time to learn, debate, and iterate, then enforce later. This improves both practice quality and engineering buy-in. While Ownership (option D) creates motivation, it's not sufficient alone—the practice must be mechanized into tooling."
+    },
+    {
+      "question": "Your service processes 10,000 requests per second. You're deploying a new version to production for the first time. Following Amazon's canary deployment approach, what should you do?",
+      "options": [
+        "Deploy to all cells simultaneously to minimize deployment duration",
+        "Deploy to one cell serving a small percentage of traffic, monitor for positive data points and potential issues, then progressively deploy to more cells",
+        "Deploy to a dedicated canary cell that receives no customer traffic, validate there, then deploy everywhere",
+        "Deploy to half of your cells, wait 24 hours, then deploy to the remaining cells"
+      ],
+      "correctIndex": 1,
+      "explanation": "Amazon deploys to cells incrementally, starting with one cell serving a small percentage of customers. They monitor for positive data points (e.g., 3,000 successes with no failures) before progressing. As confidence grows in early cells, deployment accelerates. A canary cell with no traffic (option C) wouldn't validate real customer scenarios. Deploying to half immediately (option D) risks too much impact if there's a defect."
+    },
+    {
+      "question": "Your pipeline is configured to prevent deployments when CloudWatch alarms fire. During an incident, you need to deploy a fix, but an unrelated alarm is blocking your pipeline. What should you do?",
+      "options": [
+        "Wait for the unrelated alarm to clear before deploying your fix",
+        "Remove all alarm-based blockers from your pipeline permanently to prevent future blockages",
+        "Override the alarm blocker to deploy your fix, since Amazon's pipelines allow overrides when deploying fixes to address issues",
+        "Deploy through a completely separate emergency pipeline that bypasses all safety checks"
+      ],
+      "correctIndex": 2,
+      "explanation": "Amazon's pipelines allow teams to override alarm-based blockers when deploying fixes to address the alarm condition or other critical issues. This provides safety by default while allowing flexibility during incidents. Removing blockers permanently (option B) eliminates important safeguards. Waiting (option A) prolongs customer impact. Emergency pipelines that bypass all checks (option D) are dangerous and unnecessary."
+    },
+    {
+      "question": "Your team debates whether to add integration tests that take 20 minutes to run versus faster unit tests that take 2 minutes. The integration tests would catch more issues. What principle from Amazon's continuous delivery approach should guide this decision?",
+      "options": [
+        "Always prioritize faster tests because speed is more important than comprehensive testing",
+        "Add both test types: use fast unit tests for early feedback and integration tests in pre-production stages to catch issues before production",
+        "Only use integration tests because they catch more issues, even if they slow down the pipeline",
+        "Skip both and rely on production monitoring to catch issues since that's where real customer scenarios happen"
+      ],
+      "correctIndex": 1,
+      "explanation": "Amazon uses a layered testing strategy: fast unit tests provide quick feedback on the build machine, while integration tests run in pre-production stages. The goal is to detect defects as early as possible—smaller, faster tests first, then more comprehensive tests later. This balances speed with thorough validation. Options A and C represent false dichotomies, while option D sacrifices pre-production testing entirely."
+    }
+  ]
+}

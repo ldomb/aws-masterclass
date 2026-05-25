@@ -1,0 +1,60 @@
+{
+  "lessonSlug": "caching-strategies",
+  "questions": [
+    {
+      "question": "Your service uses an in-memory cache on each server. During a deployment that replaces all servers simultaneously, the downstream database becomes overwhelmed and fails. What's the primary cause?",
+      "options": [
+        "Deployment increased overall request rate beyond capacity",
+        "Cold start - all new servers have empty caches and simultaneously request data",
+        "Cache coherence issues caused duplicate requests",
+        "In-memory caches don't support zero-downtime deployments"
+      ],
+      "correctIndex": 1,
+      "explanation": "New servers launch with completely empty in-memory caches. During fleet-wide deployments, all servers simultaneously have cache misses and request data from the downstream database, causing a traffic burst that overwhelms it. This is a classic cold start problem with in-memory caches."
+    },
+    {
+      "question": "Your external Redis cache uses a soft TTL of 5 minutes and hard TTL of 2 hours. The downstream service becomes unavailable for 30 minutes. What happens?",
+      "options": [
+        "Service fails after 5 minutes when soft TTL expires",
+        "Service continues serving cached data for up to 2 hours despite downstream unavailability",
+        "Service switches to in-memory cache after 5 minutes",
+        "All cached data is invalidated after 30 minutes"
+      ],
+      "correctIndex": 1,
+      "explanation": "The soft/hard TTL pattern attempts to refresh at soft TTL (5 min), but if the downstream service is unavailable, the service continues using existing cached data until hard TTL (2 hours) is reached. This allows the service to remain available during temporary downstream outages."
+    },
+    {
+      "question": "Your cache doesn't cache error responses. The downstream service temporarily returns 500 errors for a specific resource that 1,000 requests/sec need. What problem occurs?",
+      "options": [
+        "Cache fills up with error responses and runs out of memory",
+        "1,000 requests/sec continuously bombard the downstream service, preventing recovery",
+        "Clients receive stale data instead of errors",
+        "The cache automatically switches to a backup downstream service"
+      ],
+      "correctIndex": 1,
+      "explanation": "Without caching error responses (negative cache), every request for that resource hits the downstream service. With 1,000 req/sec continuously making requests and discarding errors, the downstream service is bombarded with traffic, preventing recovery and potentially turning a partial outage into complete failure."
+    },
+    {
+      "question": "You're adding nodes to your ElastiCache cluster. Half your cached data disappears and downstream services experience a traffic spike. What's the likely cause?",
+      "options": [
+        "ElastiCache doesn't support adding nodes without data loss",
+        "The cache client library doesn't implement consistent hashing properly",
+        "Normal behavior - caches must warm up after scaling",
+        "Security group rules are blocking the new nodes"
+      ],
+      "correctIndex": 1,
+      "explanation": "Without proper consistent hashing in the client library, adding nodes causes cache keys to be redistributed in a way that makes most existing cached data unreachable. This causes massive cache misses and traffic spikes to downstream services. This is why Amazon thoroughly tests adding/removing cache servers before production."
+    },
+    {
+      "question": "100 servers simultaneously request an uncached resource at the same time (thundering herd). With request coalescing, how many requests reach the downstream service?",
+      "options": [
+        "100 requests - one from each server",
+        "1 request - all servers wait for the first request to complete",
+        "50 requests - coalescing reduces load by half",
+        "10 requests - one per cache shard"
+      ],
+      "correctIndex": 1,
+      "explanation": "Request coalescing ensures only one pending request exists for uncached resources. When 100 servers request the same uncached resource simultaneously, the first request proceeds while the other 99 wait for it to complete. Only 1 request hits the downstream service, preventing thundering herd problems."
+    }
+  ]
+}

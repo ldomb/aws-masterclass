@@ -1,0 +1,376 @@
+## Introduction
+
+Before continuous delivery transformed Amazon's development culture, many teams relied on a rotating role called the **release captain**. This developer was responsible for coordinating code releases—scheduling deployment dates, determining which changes to include, creating release branches, building release candidates, and writing detailed deployment plans with rollback procedures. It was time-consuming work that pulled developers away from building features for customers.
+
+Today, that role has largely disappeared at Amazon. As one team's old wiki page succinctly stated: "We have moved to using pipelines. We no longer manage individual releases." The CI/CD pipelines themselves have become the automated release captains, handling all the coordination, artifact management, and deployment orchestration that previously required human intervention.
+
+This transformation freed developers to focus on what they do best—building. Instead of spending time scheduling releases, managing branches, and coordinating deployments, developers simply push their code and let the pipeline handle the rest. The pipeline continuously and safely releases changes to production, managing complexity that would be error-prone and tedious for humans to coordinate manually.
+
+## The Old Way: Manual Release Coordination
+
+Understanding the magnitude of this transformation requires appreciating the work release captains previously performed. The role typically rotated weekly to different team members because developers generally didn't enjoy it—it was time-consuming and took them away from building features.
+
+A lot of work went into coordinating each release. The release captain was responsible for:
+
+- **Scheduling the release date** and coordinating with team members
+- **Determining which changes** needed to be included in the release
+- **Assigning a release number** to track the deployment
+- **Creating a release branch** in the source code repository
+- **Building and testing release candidates** before production deployment
+- **Writing detailed deployment plans** including which release candidate would be deployed, the order of deployments to different production environments, and which metrics to monitor
+- **Documenting rollback procedures** for each production environment in case issues occurred
+- **Getting approval** for the deployment plan from other team members
+
+This manual process was not only time-consuming but also error-prone. Coordinating one release at a time to production increased the time it took for code changes to be deployed and available to customers. Any new code changes made while a release was in progress had to wait for the next release cycle.
+
+## Trunk-Based Development: Eliminating Release Branches
+
+The foundation of Amazon's continuous deployment is **trunk-based development**—a practice for managing source code version control where developers make frequent, small commits directly to a single shared branch rather than infrequently merging large sets of changes from long-lived feature branches.
+
+This single shared branch is often named "trunk" in Subversion, "main" in Git, and "mainline" in Amazon's internal Git system. With trunk-based development, developers don't need to manage long-lived feature branches for collaboration or release branches for delivery. Instead, they collaborate only on the main branch and work independently on code changes in their own repository clone, fork, or temporary branch.
+
+### The Amazon Trunk-Based Workflow
+
+At Amazon, developers generally don't think about or see branches as part of their everyday development flow. The typical workflow is straightforward:
+
+1. **Local development** on a clone of the main branch
+2. **Split work** into small, incremental changes that can each be reviewed, merged, and released independently
+3. **Work locally** for only a few days or even a few hours before submitting for review
+4. **Fetch latest commits** from main and rebase local changes, resolving any merge conflicts
+5. **Create a code review** to get approval for merging to main
+6. **Merge to main** after approval, automatically triggering the CI/CD pipeline
+
+<Callout type="info">
+Code review is the last manual approval before production deployment. After approval and merge, the pipeline automatically builds, tests, and deploys the change without further human intervention. All code changes must have an approved code review before being merged into the main branch.
+</Callout>
+
+Behind the scenes, Amazon's code review tool automatically pushes the developer's local commits to a new, unique Git reference that becomes associated with the code review. These Git references are very short-lived because they're used only for a single code review. After the review is approved and the change gets merged to main, the code review's Git reference is no longer used and the CI/CD pipeline starts building, testing, and deploying the change.
+
+Developers can set up their development environment to automatically back up local commits to a personal branch in the background, but otherwise local code changes aren't pushed to any branches such as feature branches or forks.
+
+### When Release Branches Are Still Used
+
+Release branches are now rare exceptions at Amazon, used only for urgent situations that need to deploy faster than normal pipeline cadence. In rare cases, teams might create a short-lived release branch to deploy a very urgent change, such as a security fix that needs to reach all production environments as quickly as possible.
+
+The team merges the bare minimum code changes needed for the security fix into the release branch and excludes any unrelated code changes that might be on the main branch but not yet deployed in production. This reduces the risk of accelerating the deployment of the release branch to all production environments.
+
+<Callout type="warning">
+Release branches require a high level of scrutiny. The team must review the code changes, as well as the urgency and risk of impact, with very experienced developers who are experts in operational safety, including their organization's Principal Engineers. After the fix has been fully deployed, the release branch is no longer used.
+</Callout>
+
+## Safe, Automatic Production Releases
+
+Prior to adopting CI/CD pipelines at Amazon, deploying a release to production required extensive pre-work by a release captain. The release captain wrote up a detailed plan for deploying a release to the production environments, including the code changes to be deployed, the order in which the release would be deployed to each production environment, and which metrics would be looked at to ensure it was safe to proceed with deploying to the next environment. The release captain then reviewed the plan with others and got the plan approved, all before even starting the long, manual process of deploying the release to production.
+
+Now as a developer at Amazon, the CI/CD pipeline releases changes to production automatically, without the need to create a release plan or actively monitor any production deployments.
+
+### Stages, Approvals, and Promotions
+
+Amazon's CI/CD pipelines model the automated release process across environments as a series of **stages**, **approvals**, and **promotions**. When a new release is built by the pipeline, it progresses through the pipeline by being "approved" by a stage and then "promoted" to the next stage in the pipeline.
+
+Each stage in the pipeline deploys to one or more environments in parallel, then runs a set of **approval steps** like integration tests and alarm monitoring for each of those environments. If all the deployments and approval steps in the stage succeed, then the release is approved by that stage and is promoted to the next stage of the pipeline.
+
+If any of the deployments or approval steps in the stage fail, the release isn't approved by the stage, and it isn't promoted to the next stage. Production environments are also typically automatically rolled back to get back to a healthy state when deployments or approval steps fail.
+
+<Mermaid title="Stage Promotion with Deploy and Approve Steps" chart={`graph TD
+    A[New Release] --> B[Stage 1: Deploy]
+    B --> C[Stage 1: Approve]
+    C -->|Pass| D[Promote to Stage 2]
+    C -->|Fail| E[Block & Rollback]
+    D --> F[Stage 2: Deploy]
+    F --> G[Stage 2: Approve]
+    G -->|Pass| H[Continue...]
+    G -->|Fail| I[Block & Rollback]
+`} />
+
+### Splitting Production into Smaller Environments
+
+At Amazon, teams structure their CI/CD pipelines to limit the risks associated with production deployments as much as possible by cautiously and safely releasing changes to production. One of the key strategies for minimizing deployment risk is **splitting production into many smaller production environments**, some even as small as a single virtual machine or single container (called **one-box environments**).
+
+Instead of a single large and risky production deployment, each release instead goes through a sequence of many deployments to these smaller production environments in the CI/CD pipeline. Limiting the scope of each production deployment to a single smaller environment limits the potential risk associated with each deployment to the small percentage of customer workloads or requests served by that environment.
+
+At AWS, teams typically first split production into individual Regions, and then further split Regions into:
+- A production environment for each Availability Zone
+- A one-box environment for each Availability Zone
+
+The CI/CD pipeline takes care of cautiously deploying and promoting a release across these many production environments in a series of stages and approval steps.
+
+When the first few production deployments of a new release are successful in the CI/CD pipeline, Amazon has found that teams can typically have higher confidence that the remaining production deployments for that release will also be successful. This learning has been built into how pipelines are structured by grouping some production environments into parallel deployments called **waves**.
+
+## Deployment Waves: Balancing Risk and Speed
+
+Waves let teams balance minimizing deployment risk with maximizing deployment speed in their pipelines. Each wave is made up of one or more pipeline stages that deploy to a set of production environments in parallel, then run those environments' approval steps.
+
+Earlier stages in the pipeline deploy to only one production environment at a time to limit risk and build confidence. As the release progresses and confidence grows, later stages deploy to multiple environments in parallel through waves.
+
+### Wave Structure Example
+
+Earlier waves in the pipeline deploy to only one production environment at a time to limit risk and build confidence in the safety of a release. Each wave in the pipeline builds more confidence in the release, so the waves later in the pipeline deploy to an increasing number of production environments in parallel as the release progresses down the pipeline.
+
+A sample pipeline might deploy to 26 Regions across five waves:
+
+| Wave | Number of Regions | Purpose |
+|------|------------------|---------|
+| **Wave 1** | 1 Region | Low traffic, build initial confidence |
+| **Wave 2** | 1 Region | High traffic, validate at scale |
+| **Wave 3** | 3 Regions | Moderate parallelization |
+| **Wave 4** | 12 Regions | High parallelization |
+| **Wave 5** | 9 Regions | Complete global deployment |
+
+### Zonal Deployments Within Waves
+
+The sample pipeline splits each Region into a production environment and a one-box environment for each Availability Zone (AZ), so each wave is actually made up of multiple pipeline stages.
+
+In Wave 3, for example:
+- **Stage 1**: Deploy to a one-box environment in the first Availability Zone of each Region in parallel
+- **Stage 2**: Deploy to the production environment in the first Availability Zone of each Region
+- **Stages 3 & 4**: Deploy to the second Availability Zone of each Region
+- **Stages 5 & 6**: Deploy to the third Availability Zone of each Region
+
+<Mermaid title="Wave 3 Deployment Stages Across Three AZs" chart={`graph LR
+    A[Wave 3<br/>3 Regions] --> B[AZ1<br/>One-Box]
+    B --> C[AZ1<br/>Prod]
+    C --> D[AZ2<br/>One-Box]
+    D --> E[AZ2<br/>Prod]
+    E --> F[AZ3<br/>One-Box]
+    F --> G[AZ3<br/>Prod]
+    G --> H[Wave 4]
+`} />
+
+### Stage Promotion Flow
+
+A release progresses from Stage 1 to Stage 2 of Wave 3 through **promotion**. Stage 1 deploys the release to a set of zonal one-box environments in parallel. The release is approved by Stage 1 after the zonal one-box environments successfully deploy and alarms don't fire. The release is then promoted to Stage 2.
+
+Stage 2 deploys the release to a set of zonal environments in parallel, then runs integration tests and alarm monitoring for each of those environments. This pattern continues through all stages of the wave.
+
+This structure achieves Amazon's primary objective: **prevent negative impact to multiple Availability Zones or Regions simultaneously**. Within each wave deploying to multiple Regions in parallel, the same cautious rollout behavior is used for each Region. Each step in the wave only deploys to a single Availability Zone or cell from each Region in the wave.
+
+## Multiple Inflight Releases
+
+Prior to adopting continuous deployments at Amazon, typically there was only one release at a time to production. For a release captain, it would be complex and error-prone to manually coordinate multiple releases in parallel for the same service across the service's production environments.
+
+They would need to keep careful track of which source code changes went into each release, which releases had been tested, which releases were currently deployed to each production environment, and which releases were ready to be deployed to the next production environment. However, doing one release at a time to production increased the time it took for a code change to be deployed and available to customer workloads in production. Any new code changes made while a release was in process had to wait for the next release to be deployed to production.
+
+### Automated Coordination of Parallel Releases
+
+Today, Amazon's CI/CD pipelines automate the coordination of multiple inflight releases across production environments to minimize the time that code changes spend waiting to be deployed in the pipeline. As soon as a developer merges new code changes into the main branch, a new release is built and starts progressing down the pipeline. Since developers frequently merge new code changes when practicing trunk-based development, often multiple new releases are built and enter the pipeline each day.
+
+<Callout type="tip">
+Each pipeline stage works as an independent workflow, deploying, approving, and promoting its current release. As soon as a stage finishes attempting to deploy and approve its current release, it can start working on the next release waiting to be promoted—without waiting for downstream stages to complete.
+</Callout>
+
+Because stages can run in parallel, multiple releases can be in flight in the pipeline, with each stage working to deploy, approve, and promote a different release.
+
+### Release Superseding
+
+The pipeline ensures that releases are promoted through the pipeline in the correct order. If a release catches up to another one in the pipeline, the newer release will **supersede** the older release and will be the one to continue down the pipeline.
+
+For example:
+- If one release fails a pre-production stage's integration tests, a newer release with a bug fix can successfully progress through the pipeline by superseding the older, failed release
+- If one production environment takes longer than others to deploy (due to differences in environment size), newer releases coming through the pipeline can't be promoted into that stage and will need to wait
+- If deployment and approval steps take long enough, multiple releases could be approved by the previous stage and waiting to be promoted
+- Newer releases will supersede any older releases waiting to be promoted, and only the latest approved release will be promoted after the deployment and approval steps are completed
+
+<Mermaid title="Multiple Inflight Releases: Superseding Behavior" chart={`graph TD
+    A[Stage 1: Release v105] --> B[Approved]
+    B --> C[Stage 2: Deploying v103]
+    D[Stage 1: Release v106] --> E[Approved]
+    E -.->|Waiting| C
+    F[Stage 1: Release v107] --> G[Approved]
+    G -.->|Supersedes v106| C
+    C --> H[Deployment Complete]
+    H --> I[Stage 2: Deploy v107]
+    style G fill:#90EE90,color:#1a1a1a
+    style E fill:#FFB6C1,color:#1a1a1a
+`} />
+
+### Optimizing Safety and Speed
+
+Amazon's pipelines' ability to coordinate multiple inflight releases across production environments helps optimize deployment safety and speed. For example, if a pipeline only did one release at a time to production and each release took a week to safely and cautiously deploy to all production environments, then any new code changes merged by developers during that week would need to wait for the pipeline's next release to be deployed to production.
+
+That waiting period for new code changes would slow down the speed at which changes are delivered to production. A week's worth of code changes batched together waiting for the next release would also increase the risk of deploying the next release to production. Batching up a large amount of changes into a single release increases the risk that any one of those changes could trigger production impact.
+
+By coordinating multiple inflight releases, the pipeline typically introduces only a small number of new code changes to production in each release, reducing the risk that any given production deployment will trigger impact and delivering code changes to production more quickly.
+
+## Transparent, Immutable Deployment Artifacts
+
+Amazon's CI/CD pipelines not only manage coordinating releases, they also manage what is deployed for each release—the **deployment artifact**. Previously, the release captain created a build from the source code on a release branch, assigned a release version number to the built artifact, and then carefully ensured that the correct artifact was deployed to each production environment when running the release.
+
+Today, pipelines entirely manage the deployment artifacts for releases. This process is almost entirely transparent to developers. Developers don't need to worry about calculating version numbers or keeping track of deployment artifact IDs or build IDs.
+
+### Artifact Creation and Tracking
+
+The pipeline creates a new, **immutable deployment artifact** every time new source code changes are pushed to the main branch. The pipeline then keeps track of:
+- Which source code commit the release artifact was built from
+- Which environments the release artifact has been deployed to
+
+Because the pipeline keeps track of the relationships between releases, deployments, and source code commits, developers don't need to be aware of deployment artifacts or releases to see what code has been deployed.
+
+In the pipeline UI, developers can view:
+- **Deployment history per environment**: Which new source code changes were deployed to the environment in each deployment
+- **Deployment status per commit**: Where a particular source code change has been deployed by the pipeline (e.g., to see if a bug fix has been deployed to all production environments)
+
+### Deployment History Views
+
+The pipeline can populate views using its records of releases, deployments, and source code commits:
+
+**Deployment History for a Given Environment:**
+
+| Deployment | Approval | Changes | Commit IDs |
+|------------|----------|---------|------------|
+| deploy-545a21 (1h ago) | Approved | 1 commit | c22183 |
+| deploy-50731d (3h ago) | Approved | 1 commit | 906add |
+| deploy-1d5fb5 (1d ago) | Tests failed | 2 commits | 4871e2..13afb4 |
+| deploy-51879b (1d ago) | Approved | 3 commits | 325319..69726d |
+| deploy-f1b8e4 (2d ago) | Alarm fired | 8 commits | 2078c0..ef8e3b |
+
+**Deployment History for a Source Code Commit:**
+
+| Environment | Deployment |
+|-------------|------------|
+| Beta | deploy-899c98 (3d ago) |
+| Gamma | deploy-f228c6 (3d ago) |
+| Prod-1 | deploy-010469 (2d ago) |
+| Prod-2 | deploy-9c8dac (1d ago) |
+| Prod-3 | deploy-7e10c7 (3h ago) |
+
+This transparency means developers don't need to track deployment artifact IDs or version numbers. They can simply ask: "Has my bug fix deployed to all production environments?" The pipeline provides the answer.
+
+### Immutable Artifacts
+
+Immutable deployment artifacts help ensure that the pipeline can accurately keep track of the deployment history of releases and the associated source code across many environments. When the pipeline is triggered by a new source code change on the main branch, the pipeline creates a new, unique deployment artifact containing everything needed for deployment and assigns a unique ID to it.
+
+These deployment artifacts might include:
+- Amazon Machine Images (AMIs)
+- Docker images
+- AWS Lambda function deployment packages
+- AWS CloudFormation templates
+
+After the deployment artifact for a release is built by the pipeline, it isn't altered in any subsequent stage. For example, for a containerized application, the pipeline might:
+1. Build the application's source code
+2. Create a Docker image with a unique tag
+3. Push the image to a container registry
+4. Generate an infrastructure as code template that will deploy that new Docker image using its unique tag
+5. Store the template in Amazon S3 using a unique name
+
+The deployment stages in the pipeline then deploy these immutable deployment artifacts from the container registry and Amazon S3 and don't interact directly with the source code repository.
+
+**Try it yourself:** Experiment with the interactive simulation below to see how CI/CD pipelines with wave-based deployments, release superseding, and automatic rollbacks work in practice.
+
+<DeploymentSimulator />
+
+## Easy and Automatic Rollbacks
+
+Rollbacks are a crucial part of Amazon's operational culture. The first question an on-call engineer is typically asked during an operational event is **"Do you have any recent deployments that need to be rolled back?"**
+
+Amazon's operational practices prioritize mitigating an issue first, and waiting to do deep troubleshooting later, after relieving the impact on customers. Teams have found that rolling back any recent deployments prior to the start of an operational issue is frequently the fastest path to mitigation, even before determining whether any code changes in those deployments triggered the issue.
+
+Spending time to identify which specific code change triggered the issue or working to get a new code change deployed to fix the issue prolongs the impact on customers. Instead, the first action is to proactively roll back any recent deployments across the team's microservices.
+
+### Manual Rollback Process (The Old Way)
+
+Prior to adopting CI/CD pipelines at Amazon, a release captain spent significant time writing up a detailed plan for rolling back each production deployment before starting the release, to be used in case the new release triggered any operational issues. The release captain needed to carefully note which release and deployment artifacts were currently deployed to each production environment and document the steps to take to re-deploy the previous artifacts, so that they could correctly roll back the environment to its previous state.
+
+### Automated Rollback Today
+
+Because Amazon's operational practices are built around rollbacks, the CI/CD pipeline system was built to both automatically roll back production environments and to enable developers to roll back their production environments quickly and easily.
+
+Today, developers at Amazon don't need to spend crucial time during an operational event trying to figure out any manual steps to roll their environments back to an older version. Pipelines monitor alarms and automatically roll back any ongoing deployments if alarms are triggered. In most cases during an operational issue, the pipeline has already started rolling back deployments when the on-call engineer is engaged.
+
+### Manual Rollback Initiation
+
+If the on-call engineer does need to roll back an environment, they can follow a few simple steps in the CI/CD pipeline UI to kick off a rollback deployment:
+
+1. **Select environments** to roll back in the pipeline UI
+2. **The pipeline automatically selects** the last release that was successfully deployed and approved in those environments for re-deployment
+3. **Preview the differences** between the current release and the selected rollback release's deployment artifacts (like source code changes and changes in library versions)
+4. **Approve the rollback** in the pipeline UI
+5. **The pipeline starts new deployments** to the selected environments with the selected rollback release's deployment artifacts
+
+The rollback action in Amazon's pipelines kicks off a regular deployment, but instead of deploying a new release, a rollback deployment re-deploys an older release that was previously successfully deployed to that environment. A rollback deployment effectively restores the system back to an older point in time when the environment was healthy, including rolling back the application, the infrastructure as code templates, and the configuration files contained in the older release's deployment artifact.
+
+<Callout type="warning">
+Rollback deployments follow the same steps as regular deployments, using immutable artifacts and immutable environments to ensure no side effects or unintended changes occur during rollback.
+</Callout>
+
+### Handling Latent Changes
+
+In some cases, the code change that triggered an operational issue was deployed to the production environment multiple deployments ago and is only now triggering customer impact—this is what Amazon calls a **latent change**. For example, a change that is determined to be currently causing impact might have been deployed to an environment a week ago, and that environment has had multiple successful deployments of new changes since then.
+
+Rolling back to the most recent previous deployment would not remove that change from the environment. To roll back the latent change, the developer can choose which previously deployed release to use for the rollback in the pipeline UI, instead of the default selected release.
+
+However, the developer must first weigh the trade-offs:
+- Rolling back the latent change along with a week's worth of other code changes (which may include new features and bug fixes)
+- Versus waiting for the pipeline to "roll forward" a new release that includes a bug fix
+
+To help the developer and their team make this decision, the pipeline UI shows the history of releases that have been deployed to the environment, including:
+- When each release was previously deployed
+- The code changes in each release
+- Whether each release was approved through successful deployment and approval steps like integration tests
+
+### Post-Rollback Actions
+
+When the developer initiates a rollback deployment, promotions into and out of the selected environments are automatically disabled in the pipeline to prevent the release from being re-deployed. At that point, the developer has a few options on how to proceed after any immediate impact on customers has been mitigated by the rollback:
+
+1. **Proactively roll back more environments** that could potentially also be affected, even if they aren't currently showing any customer impact
+2. **Wait for the pipeline to roll forward a new release** that includes a bug fix if the issue appears to be environment-specific
+
+The source code repository isn't affected by the developer initiating a rollback, so any source code changes that caused impact in production will still be checked into the main branch of the repository. Once the code change that caused customer impact is identified, the developer can either:
+- Work on a bug fix and merge it into main
+- Create a revert Git commit to remove the changes and merge it into main
+
+When the bug fix or revert is merged into the repository, the pipeline builds and deploys those changes. The developer re-enables promotions into and out of the rolled-back environments when the pipeline is ready to promote the fix into those environments.
+
+### Rollback and Roll-Forward Scenario
+
+The following scenario illustrates how Amazon handles rollbacks and roll-forwards:
+
+**Initial State**: A pipeline deploys a Lambda function to each Region across seven pipeline stages.
+
+**Step 1 - Issue Detected**: A single production environment experiences customer impact and is rolled back using the pipeline UI to mitigate the issue.
+
+**Step 2 - Preventive Rollbacks**: The developer decides to roll back a few more production environments that could also be impacted by the issue, even though they aren't currently showing impact.
+
+**Step 3 - Fix and Roll Forward**: The developer creates a bug fix and merges it into the source code repository. The pipeline builds a new release with the fix and starts rolling it forward through the stages.
+
+**Step 4 - Re-enable Promotions**: The developer re-enables promotions between stages as needed to safely get the bug fix deployed to all environments, including those that were rolled back.
+
+<Mermaid title="Roll Forward: Rollback Then Fix and Redeploy" chart={`graph LR
+    A[Issue in Prod-3] --> B[Rollback Prod-3]
+    B --> C[Disable<br/>promotions]
+    C --> D[Rollback<br/>Prod-4, Prod-5]
+    D --> E[Developer<br/>creates fix]
+    E --> F[Merge to main]
+    F --> G[Pipeline builds<br/>new release]
+    G --> H[Deploy to<br/>Beta/Gamma]
+    H --> I[Re-enable<br/>promotions]
+    I --> J[Roll forward<br/>to all Prod]
+    style A fill:#FFB6C1,color:#1a1a1a
+    style B fill:#FFE4B5,color:#1a1a1a
+    style E fill:#90EE90,color:#1a1a1a
+    style J fill:#90EE90,color:#1a1a1a
+`} />
+
+## Immutability Enables Safe Rollbacks
+
+Designing software changes that can be safely rolled back by the pipeline requires using **immutable artifacts** and **immutable environments**.
+
+Deploying code into the same directory on an EC2 instance for every deployment is an example of a **mutable environment**. Deployments to this environment could leave newer files hanging around in the directory even after a rollback, which could cause an operational issue by impacting the older code's behavior.
+
+By instead using infrastructure as code and deploying immutable AMIs, container images, and Lambda functions, Amazon ensures that the application's environment is completely replaced with the older release after a rollback deployment.
+
+Even in cases where a team deploys code onto existing EC2 instances (instead of replacing them with a new AMI), teams strive for immutability as much as possible:
+- Each deployment creates a brand-new directory where it deploys the new code
+- Symbolic links are updated to point to the current version's directory
+- During a rollback deployment, the same steps occur: the older code is deployed to a new directory and the symbolic links are updated
+
+This approach reduces the chances of causing any side effects by rolling back.
+
+<KeyTakeaways>
+- **Trunk-based development eliminates release coordination**: Developers commit frequently to main branch instead of managing long-lived feature or release branches, allowing pipelines to continuously release changes without manual scheduling
+- **Pipelines automate release captain responsibilities**: Stages, approvals, and promotions handle all deployment coordination that previously required manual planning, artifact management, and deployment orchestration
+- **Deployment waves balance safety and speed**: Early waves deploy cautiously to single environments to build confidence, while later waves deploy to multiple environments in parallel as confidence grows
+- **Multiple inflight releases minimize wait time**: Pipelines coordinate multiple releases automatically, with newer releases superseding older ones to deliver changes quickly without batching risks
+- **Immutable artifacts enable transparent tracking**: Pipelines automatically create unique deployment artifacts and track their relationships to source commits and environments, eliminating manual version management
+- **Automatic and manual rollbacks are built into the culture**: Pipelines monitor alarms and roll back automatically, while the UI enables simple manual rollbacks by re-deploying previous successful releases using the same deployment process
+</KeyTakeaways>

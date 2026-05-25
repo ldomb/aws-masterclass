@@ -1,0 +1,60 @@
+{
+  "lessonSlug": "fairness-multi-tenant",
+  "questions": [
+    {
+      "question": "A multi-tenant API service is scaled for 10,000 TPS and currently serving 6,000 TPS across 100 customers. Customer A (quota: 1,000 TPS) suddenly spikes to 3,000 TPS. What is the MOST fair response?",
+      "options": [
+        "Allow all 3,000 TPS since the service has 4,000 TPS of unused capacity",
+        "Reject all requests from Customer A until they reduce their rate",
+        "Allow 1,000 TPS for Customer A and reject the excess 2,000 TPS",
+        "Apply load shedding across all 100 customers proportionally"
+      ],
+      "correctIndex": 2,
+      "explanation": "Option C provides fairness by enforcing Customer A's quota while maintaining service for others. Option A seems efficient but defeats the purpose of quotas—if every customer bursts simultaneously, the service becomes overloaded. Option B is too harsh (reject some, not all). Option D unfairly impacts customers operating within their quotas. Amazon services may allow temporary bursting into unused capacity, but the customer should know they're over quota and at risk."
+    },
+    {
+      "question": "Your team is implementing distributed rate limiting across 20 servers for a customer quota of 10,000 TPS. Traffic is uniformly distributed by a load balancer. What is the simplest effective approach?",
+      "options": [
+        "Use a centralized Redis server to track exact counts for each customer",
+        "Each server enforces 500 TPS locally (10,000 / 20 servers)",
+        "Servers periodically share observed rates and adjust limits dynamically",
+        "Use a token bucket algorithm with burst capacity of 20,000"
+      ],
+      "correctIndex": 1,
+      "explanation": "Option B (dividing quota by server count) is simplest and works well when traffic is uniformly distributed by a load balancer. Option A (centralized Redis) works but adds complexity and a potential bottleneck. Option C (rate sharing) is complex and hard to get right. Option D (token bucket) is a local algorithm, not a distributed approach. Amazon's principle: use the simplest approach that works, only adding complexity when proven necessary."
+    },
+    {
+      "question": "You're designing a control plane API for managing millions of IoT devices. Customers need to update device configurations frequently. How should you help customers avoid rate limit issues?",
+      "options": [
+        "Set very high rate limits (100,000 TPS) to accommodate any customer need",
+        "Provide a bulk update API that accepts a file and processes changes asynchronously",
+        "Tell customers to implement exponential backoff and retry when they hit rate limits",
+        "Auto-scale customer quotas based on the number of devices they have"
+      ],
+      "correctIndex": 1,
+      "explanation": "Option B (bulk async API) is the best solution, demonstrated by AWS IoT's Bulk Provisioning APIs. Customers upload files with changes; the service processes them asynchronously and returns results. This eliminates complex retry logic and prevents crowding out other operations. Option A defeats the purpose of rate limiting. Option C puts burden on customers. Option D helps but doesn't eliminate the fundamental mismatch between control plane rates and data plane needs."
+    },
+    {
+      "question": "A customer receives both 503 and 429 errors from your API. What is the difference in meaning, and how should their client respond?",
+      "options": [
+        "Both mean the same thing (rate limiting); retry with exponential backoff for both",
+        "503 means server overload (temporary); 429 means client over quota (reduce overall rate)",
+        "429 means server overload; 503 means client over quota",
+        "503 requires increasing quota; 429 requires the service to scale"
+      ],
+      "correctIndex": 1,
+      "explanation": "503 (5xx) indicates server-side problems—the service is overloaded, auto-scaling is in progress, temporary backoff is appropriate. 429 (4xx) indicates client-side issues—the client is over their quota and should reduce their overall request rate or request a quota increase. This distinction helps clients understand root causes and respond appropriately. Option A treats them identically, missing this important signal. Options C and D reverse the meanings."
+    },
+    {
+      "question": "Your DynamoDB table receives 1 million unique keys per day. You want to implement per-key rate limiting to prevent hot key issues. What is the biggest challenge?",
+      "options": [
+        "DynamoDB doesn't support per-key rate limiting at all",
+        "Tracking exact counts for 1 million keys requires too much memory",
+        "Per-key limits are too slow to enforce at high request rates",
+        "Customers won't understand per-key quota violations"
+      ],
+      "correctIndex": 1,
+      "explanation": "High-cardinality dimensions (millions of keys) make exact rate tracking impractical—you can't keep a counter for every possible key in memory. Amazon uses algorithms like Heavy Hitters, Top Talkers, and Counting Bloom filters that provide accuracy guarantees while limiting memory usage. They track the highest-traffic keys without tracking every key. CloudWatch Contributor Insights helps operators analyze these high-cardinality patterns."
+    }
+  ]
+}

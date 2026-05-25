@@ -1,0 +1,60 @@
+{
+  "lessonSlug": "availability-and-beyond",
+  "questions": [
+    {
+      "question": "You're designing a system with a target availability of 99.99%. Which combination of changes will have the GREATEST impact on improving availability?",
+      "options": [
+        "Only increasing MTBF by reducing the frequency of failures",
+        "Only reducing MTTR by implementing faster recovery procedures",
+        "Reducing both MTTD (detection time) and MTTR (repair time) while maintaining current MTBF",
+        "Adding more monitoring without changing MTBF or MTTR"
+      ],
+      "correctIndex": 2,
+      "explanation": "Reducing both MTTD and MTTR has the greatest impact because MTTR includes MTTD, and faster detection plus faster repair dramatically reduces total downtime. The availability formula A = MTBF / (MTBF + MTTR) shows that reducing the denominator (MTTR) has immediate effect, especially when coupled with faster detection. This is often more achievable than increasing MTBF for distributed systems where failure causes are unpredictable."
+    },
+    {
+      "question": "What is the key difference between Bohrbugs and Heisenbugs in distributed systems?",
+      "options": [
+        "Bohrbugs affect hardware while Heisenbugs affect software",
+        "Bohrbugs are repeatable and deterministic, while Heisenbugs are transient and appear under specific uncommon conditions",
+        "Bohrbugs are more common in production than Heisenbugs",
+        "Bohrbugs can be fixed by restarting the system while Heisenbugs cannot"
+      ],
+      "correctIndex": 1,
+      "explanation": "Bohrbugs are repeatable functional issues that consistently produce the same incorrect output given the same input—like the deterministic Bohr atom model. Heisenbugs are transient, only occurring under specific conditions like race conditions or hardware faults, and they seem to disappear when you try to debug them. Heisenbugs make up the majority of production bugs, which is why fault tolerance through retries and restarts is so important—restarting often succeeds because the environmental conditions change."
+    },
+    {
+      "question": "Your workload uses three dependencies, each with 99.5% availability SLAs. Using the sparing formula, if you add two spare subsystems for one of these dependencies, what is the approximate availability improvement for that dependency?",
+      "options": [
+        "From 99.5% to 99.75%",
+        "From 99.5% to 99.9%",
+        "From 99.5% to 99.9999875%",
+        "From 99.5% to 100%"
+      ],
+      "correctIndex": 2,
+      "explanation": "With two spares (3 total subsystems), using the formula A ≈ 1 - (1)(1-0.995)³ = 99.9999875%, representing about 3.94 seconds of downtime per year. This demonstrates the dramatic availability improvement from sparing, but also illustrates diminishing returns—going from 2 to 10 spares would only save about 4 additional seconds per year at 5× the cost."
+    },
+    {
+      "question": "You're architecting a payment processing system's recovery mechanism. During a failure, which approach aligns with the principle of static stability?",
+      "options": [
+        "Call Auto Scaling APIs to provision new EC2 instances when failure is detected",
+        "Pre-provision spare capacity across three Availability Zones so traffic can immediately shift to healthy resources without calling control plane APIs",
+        "Implement a complex workflow that intelligently determines the minimum resources needed and provisions them on-demand",
+        "Use a single Availability Zone with auto-scaling for cost efficiency"
+      ],
+      "correctIndex": 1,
+      "explanation": "Static stability means pre-provisioning spare capacity to avoid dependencies on control planes during recovery. Option 2 aligns with Rule 7 (don't take dependencies on control planes in your data plane, especially during recovery). While auto-scaling is valuable for gradual load changes, depending on it for recovery adds latency and a control plane dependency that could fail or be slow when you need it most. Pre-provisioned spares across AZs enable immediate failover."
+    },
+    {
+      "question": "Your API receives 1,000,000 requests in a five-minute window and successfully processes 995,000 of them (99.5% success rate). A second low-traffic API receives 100 requests and successfully processes 50 of them (50% success rate). What is the service-level availability if you average the two APIs versus summing all requests?",
+      "options": [
+        "Both methods yield 99.5% availability",
+        "Averaging yields 74.95% while summing yields 99.895%",
+        "Averaging yields 99.895% while summing yields 74.95%",
+        "Both methods yield 74.95% availability"
+      ],
+      "correctIndex": 1,
+      "explanation": "Averaging the two APIs: (99.5% + 50%) / 2 = 74.95%. Summing requests: (995,000 + 50) / (1,000,000 + 100) = 999,050 / 1,000,100 = 99.895%. This demonstrates the importance of understanding what your availability metrics represent. Averaging equally weights each API regardless of traffic volume, making it better for detecting low-traffic APIs with problems. Summing focuses on the overall request success rate, which can mask issues with low-traffic but critical APIs."
+    }
+  ]
+}

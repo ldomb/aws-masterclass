@@ -1,0 +1,288 @@
+{
+  "title": "AWS Distributed Systems: Builders' Library Masterclass",
+  "description": "Master the battle-tested principles and patterns behind AWS's most reliable services. This comprehensive course distills decades of distributed systems expertise from Amazon's elite engineers into actionable lessons for building resilient, scalable cloud applications.",
+  "modules": [
+    {
+      "id": 1,
+      "title": "Foundations of Distributed Systems",
+      "slug": "foundations",
+      "description": "Understand the fundamental challenges of distributed systems and the core principles that separate fragile architectures from resilient ones. Learn why traditional reliability approaches fail at scale and discover the mental models used by AWS engineers to reason about system behavior under real-world conditions.",
+      "lessons": [
+        {
+          "id": 1,
+          "title": "Why Distributed Systems Are Hard",
+          "slug": "challenges-with-distributed-systems",
+          "description": "Explore the inherent complexities that make distributed systems fundamentally different from monolithic applications, including partial failures, network unreliability, and the impossibility of perfect coordination.",
+          "author": null,
+          "estimatedMinutes": 60,
+          "sourceArticle": "challenges-with-distributed-systems.txt"
+        },
+        {
+          "id": 2,
+          "title": "Measuring and Designing for High Availability",
+          "slug": "availability-and-beyond",
+          "description": "Move beyond simple uptime metrics to understand what true resilience means. Learn how to define, measure, and architect for availability using MTBF, MTTR, and graceful degradation strategies.",
+          "author": null,
+          "estimatedMinutes": 60,
+          "sourceArticle": "availability-and-beyond-improving-resilience.txt"
+        },
+        {
+          "id": 3,
+          "title": "Real-World Resilience: Lessons from Peak Traffic",
+          "slug": "resilience-lessons-lunch-rush",
+          "description": "Discover how everyday analogies reveal the core patterns of distributed resilience, with practical insights on handling traffic spikes, managing dependencies, and maintaining service quality under pressure.",
+          "author": null,
+          "estimatedMinutes": 60,
+          "sourceArticle": "Resilience-lessons-from-the-lunch-rush_by_Mike_Haken.txt"
+        },
+        {
+          "id": 4,
+          "title": "The Constant Work Pattern",
+          "slug": "reliability-constant-work",
+          "description": "Learn why systems that perform steady, predictable work are inherently more reliable than event-driven alternatives, and how to apply this principle to configuration distribution, health checking, and more.",
+          "author": null,
+          "estimatedMinutes": 60,
+          "sourceArticle": "Reliability-constant-work-and-a-good-cup-of-coffee-Colm-MacCarthaigh.txt"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Fault Isolation & Resilience Patterns",
+      "slug": "fault-isolation",
+      "description": "Master the art of containing failures before they cascade. This module covers sophisticated approaches to fault isolation, from availability zone architecture to shuffle-sharding, teaching you how to build systems where single failures never become total outages.",
+      "lessons": [
+        {
+          "id": 5,
+          "title": "Blast Radius and Failure Boundaries",
+          "slug": "fault-isolation-boundaries",
+          "description": "Understand how cloud infrastructure is structured to contain failures at multiple layers — from hardware racks to regions — and how to leverage these boundaries in your own architectures.",
+          "author": null,
+          "estimatedMinutes": 60,
+          "sourceArticle": "aws-fault-isolation-boundaries.txt"
+        },
+        {
+          "id": 6,
+          "title": "Designing for Static Stability",
+          "slug": "static-stability-availability-zones",
+          "description": "Learn the principle of static stability and how to architect multi-AZ applications that remain fully operational even when control planes fail or network partitions occur.",
+          "author": null,
+          "estimatedMinutes": 60,
+          "sourceArticle": "static-stability-using-availability-zones.txt"
+        },
+        {
+          "id": 7,
+          "title": "Surviving Gray Failures Across Zones",
+          "slug": "advanced-multi-az-resilience",
+          "description": "Go beyond basic multi-AZ deployments to detect and recover from subtle gray failures using differential observability, composite alarms, and automated zonal evacuation.",
+          "author": null,
+          "estimatedMinutes": 60,
+          "sourceArticle": "advanced-multi-az-resilience-patterns.txt"
+        },
+        {
+          "id": 8,
+          "title": "Breaking Correlation Chains",
+          "slug": "minimizing-correlated-failures",
+          "description": "Discover why seemingly independent systems fail together and learn proven strategies — from jitter to cellular architecture — to prevent single causes from cascading across your fleet.",
+          "author": null,
+          "estimatedMinutes": 60,
+          "sourceArticle": "minimizing-correlated-failures-in-distributed-systems.txt"
+        },
+        {
+          "id": 9,
+          "title": "Shuffle-Sharding: Mathematical Isolation",
+          "slug": "shuffle-sharding",
+          "description": "Master shuffle-sharding, an elegant combinatorial technique that dramatically reduces blast radius by ensuring different customers share resources in unique, mathematically optimal patterns.",
+          "author": null,
+          "estimatedMinutes": 60,
+          "sourceArticle": "workload-isolation-using-shuffle-sharding.txt"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Traffic Management & Overload Protection",
+      "slug": "traffic-management",
+      "description": "Learn how to build systems that gracefully handle overload instead of collapsing under pressure. This module covers sophisticated traffic management techniques to maintain stability during traffic surges, cascading failures, and degraded conditions.",
+      "lessons": [
+        {
+          "id": 10,
+          "title": "Retry Strategies That Don't Make Things Worse",
+          "slug": "timeouts-retries-backoff",
+          "description": "Master the nuanced art of retry logic, including why naive retries amplify failures and how exponential backoff with jitter prevents thundering herds from overwhelming recovering systems.",
+          "author": null,
+          "estimatedMinutes": 60,
+          "sourceArticle": "timeouts-retries-and-backoff-with-jitter.txt"
+        },
+        {
+          "id": 11,
+          "title": "Designing Idempotent APIs for Safe Retries",
+          "slug": "idempotent-apis",
+          "description": "Understand how to design APIs that can be safely retried without creating duplicate resources or corrupting state, using idempotency tokens and exactly-once semantics.",
+          "author": null,
+          "estimatedMinutes": 60,
+          "sourceArticle": "making-retries-safe-with-idempotent-apis-malcolm-featonby.txt"
+        },
+        {
+          "id": 12,
+          "title": "Inverting the Flow: Letting Small Services Lead",
+          "slug": "smaller-service-in-control",
+          "description": "Learn the counterintuitive pattern of letting downstream services control request rates, preventing scenarios where large callers overwhelm smaller dependencies.",
+          "author": null,
+          "estimatedMinutes": 60,
+          "sourceArticle": "Avoiding overload in distributed systems by putting the smaller service in control-Joe Magerramov.txt"
+        },
+        {
+          "id": 13,
+          "title": "Why Fallback Is a Trap",
+          "slug": "avoiding-fallback",
+          "description": "Discover why fallback mechanisms often cause more problems than they solve, and learn when failing fast is safer than cascading to untested alternative code paths.",
+          "author": null,
+          "estimatedMinutes": 60,
+          "sourceArticle": "avoiding-fallback-in-distributed-systems.txt"
+        },
+        {
+          "id": 14,
+          "title": "Taming Queue Backlogs Under Pressure",
+          "slug": "queue-backlogs",
+          "description": "Learn how to design queue-based systems that remain responsive under load by shedding work intelligently, implementing fairness, and preventing queues from becoming infinite buffers of stale work.",
+          "author": null,
+          "estimatedMinutes": 60,
+          "sourceArticle": "avoiding-insurmountable-queue-backlogs.txt"
+        },
+        {
+          "id": 15,
+          "title": "Caching Without the Pitfalls",
+          "slug": "caching-strategies",
+          "description": "Master cache architecture patterns that improve performance without creating availability risks, including strategies for warming, invalidation, and handling thundering herds on cache misses.",
+          "author": null,
+          "estimatedMinutes": 60,
+          "sourceArticle": "caching-challenges-and-strategies.txt"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Service Dependencies & Multi-Tenancy",
+      "slug": "service-dependencies",
+      "description": "Explore advanced patterns for managing service interdependencies and multi-tenant architectures. Learn how to prevent noisy neighbors, handle dependency failures, and coordinate distributed operations without sacrificing availability.",
+      "lessons": [
+        {
+          "id": 16,
+          "title": "Bulkheads and Concurrency Limits",
+          "slug": "dependency-isolation",
+          "description": "Learn sophisticated techniques to ensure that failures in one dependency don't propagate throughout your system, including bulkheading, concurrency budgets, and adaptive capacity management.",
+          "author": null,
+          "estimatedMinutes": 60,
+          "sourceArticle": "Dependency_Isolation_by_DavidYanacek.txt"
+        },
+        {
+          "id": 17,
+          "title": "Preventing Noisy Neighbors in Shared Systems",
+          "slug": "fairness-multi-tenant",
+          "description": "Discover how to build multi-tenant systems where no single customer can monopolize resources, using token buckets, admission control, and quota-aware architectures.",
+          "author": null,
+          "estimatedMinutes": 60,
+          "sourceArticle": "fainess-in-multi-tenant-systems-david-yanacek.txt"
+        },
+        {
+          "id": 18,
+          "title": "Coordination with Leader Election and Leases",
+          "slug": "leader-election",
+          "description": "Master the algorithms and practical considerations for leader election, including lease-based coordination, split-brain prevention, and when to avoid leaders altogether.",
+          "author": null,
+          "estimatedMinutes": 60,
+          "sourceArticle": "leader-election-in-distributed-systems.txt"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Safe Deployments & CI/CD",
+      "slug": "safe-deployments",
+      "description": "Learn how to deploy thousands of changes daily without outages. This module reveals deployment pipelines, automated safety checks, and progressive rollout strategies that enable rapid innovation while maintaining exceptional reliability.",
+      "lessons": [
+        {
+          "id": 19,
+          "title": "Speed Through Safety: Continuous Delivery at Scale",
+          "slug": "continuous-delivery",
+          "description": "Understand how frequent, small deployments paradoxically increase reliability by reducing change complexity, enabling faster detection, and keeping teams sharp on the deployment process.",
+          "author": null,
+          "estimatedMinutes": 60,
+          "sourceArticle": "going-faster-with-continuous-delivery.txt"
+        },
+        {
+          "id": 20,
+          "title": "Your Pipeline as the Last Line of Defense",
+          "slug": "cicd-release-captain",
+          "description": "Learn how to build deployment pipelines that act as automated release captains, making go/no-go decisions based on metrics, canary analysis, and progressive validation.",
+          "author": null,
+          "estimatedMinutes": 60,
+          "sourceArticle": "CICD_pipeline_as_release_captain.txt"
+        },
+        {
+          "id": 21,
+          "title": "Hands-Off Deployments with Auto-Rollback",
+          "slug": "automating-safe-deployments",
+          "description": "Discover deployment automation patterns that enable engineers to push code confidently, with automatic rollback, progressive traffic shifting, and multi-region coordination.",
+          "author": null,
+          "estimatedMinutes": 60,
+          "sourceArticle": "automating-safe-hands-off-deployments-clareliguori.txt"
+        },
+        {
+          "id": 22,
+          "title": "Designing for Rollback Safety",
+          "slug": "rollback-safety",
+          "description": "Learn how to design changes that can be safely rolled back at any point, avoiding schema migrations, protocol changes, and feature flags that create one-way doors in production.",
+          "author": null,
+          "estimatedMinutes": 60,
+          "sourceArticle": "ensuring-rollback-safety-during-deployments.txt"
+        },
+        {
+          "id": 23,
+          "title": "Proving Resilience with Chaos Engineering",
+          "slug": "chaos-engineering",
+          "description": "Master the practice of deliberately injecting failures into production systems to build confidence, discover hidden dependencies, and validate that your resilience mechanisms actually work.",
+          "author": null,
+          "estimatedMinutes": 60,
+          "sourceArticle": "chaos-engineering-on-aws.txt"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Observability & Operational Excellence",
+      "slug": "observability",
+      "description": "Learn how to instrument and monitor distributed systems for operational excellence. This module covers the observability practices that enable teams to detect issues before customers notice, diagnose problems quickly, and maintain situational awareness at scale.",
+      "lessons": [
+        {
+          "id": 24,
+          "title": "Health Checks That Actually Work",
+          "slug": "health-checks",
+          "description": "Design health checks that accurately reflect service health without creating cascading failures or masking degraded states. Learn the difference between liveness, readiness, and deep dependency checks.",
+          "author": null,
+          "estimatedMinutes": 60,
+          "sourceArticle": "implementing-health-checks.txt"
+        },
+        {
+          "id": 25,
+          "title": "Dashboards for Rapid Incident Response",
+          "slug": "dashboards-operational-visibility",
+          "description": "Master the art of dashboard design that enables operators to quickly understand system state, identify anomalies, and make confident decisions during incidents.",
+          "author": null,
+          "estimatedMinutes": 60,
+          "sourceArticle": "building-dashboards-for-operational-visibility-johnoshea.txt"
+        },
+        {
+          "id": 26,
+          "title": "End-to-End Instrumentation Strategies",
+          "slug": "instrumenting-distributed-systems",
+          "description": "Learn comprehensive instrumentation strategies covering metrics, structured logs, and distributed traces that provide full visibility into request flows and enable rapid root cause analysis.",
+          "author": null,
+          "estimatedMinutes": 60,
+          "sourceArticle": "instrumenting-distributed-systems-for-operational-visibility.txt"
+        }
+      ]
+    }
+  ]
+}

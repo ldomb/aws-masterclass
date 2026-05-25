@@ -1,0 +1,733 @@
+## Introduction
+
+Queues are powerful tools for building reliable asynchronous systems. They allow one system to accept messages from another and persist them until fully processed, even during long outages, server failures, or downstream problems. Rather than dropping messages when failures occur, queues re-drive messages until successful processing completes.
+
+At Amazon, we build many asynchronous systems leveraging queues—from workflows involving physical fulfillment that might take hours, to coordination steps for launching RDS instances, to batching systems that aggregate CloudWatch metrics and logs. Queues increase a system's **durability and availability** at the cost of occasional increased latency during retries.
+
+However, the benefits of queues come with subtle risks. We've learned over the years that **queueing meant to improve availability can backfire**, dramatically increasing recovery time after outages. When processing stops but messages keep arriving, message debt accumulates into large backlogs, driving up processing time. Work completes too late for results to be useful, causing the very availability hit that queueing was meant to prevent.
+
+This phenomenon isn't theoretical—it represents one of the most insidious failure modes in distributed systems. A queue-based system has **bimodal behavior** with two distinct operating modes, and understanding how to prevent the transition between these modes is critical for building resilient services.
+
+In this lesson, we'll explore the duplicitous nature of queues, examine how Amazon measures availability and latency in asynchronous systems, investigate the unique challenges of multitenant queue systems, and learn the comprehensive strategies AWS services use to prevent insurmountable backlogs.
+
+## The Duplicitous Nature of Queues
+
+Queue-based systems exhibit bimodal behavior—two distinct modes of operation that behave fundamentally differently:
+
+### Fast Mode: The Happy Path
+
+When there's no backlog in the queue, the system's latency is low and everything hums along beautifully. Messages arrive, get processed promptly, and complete within expected timeframes. System operators are happy. Customers are happy. The queue appears to be doing exactly what it was designed to do: providing durability and reliability without meaningful latency impact.
+
+In this mode, the queue acts as a thin layer of abstraction that provides valuable guarantees around message delivery. If a processing server crashes, the message isn't lost—it's re-driven to another server. If there's a transient network issue, the system retries automatically. The queue absorbs small fluctuations in load, smoothing out brief spikes or processing slowdowns.
+
+### Slow Mode: The Sinister Shift
+
+But when a failure or unexpected load pattern causes the arrival rate to exceed the processing rate, the system quickly flips into a more sinister operating mode. In this mode, end-to-end latency grows higher and higher. Working through the backlog to return to fast mode can take an enormous amount of time—often far longer than the original outage that caused the backlog.
+
+<Mermaid title="Queue Backlog Accumulation and Long Recovery Period" chart={`graph TD
+    A[Normal Operation<br/>Fast Mode] -->|Arrival Rate > Processing Rate| B[Backlog Begins Building]
+    B -->|Continued Load| C[Massive Backlog<br/>Slow Mode]
+    C -->|Outage Resolved| D[Long Recovery Period]
+    D -->|Requires 2x Capacity| A
+
+    style A fill:#4caf50,color:#fff
+    style B fill:#ffeb3b,color:#1a1a1a
+    style C fill:#f44336,color:#fff
+    style D fill:#ff9800,color:#fff
+`} />
+
+The mathematics of recovery are unforgiving. Consider a system experiencing an hour-long outage while processing messages. During this hour, messages continue to arrive (assuming the producer side remains healthy). When the system recovers and can process messages again, it faces:
+
+- The normal ongoing arrival rate of new messages
+- The accumulated backlog from the hour of downtime
+
+Regardless of the given rate and processing capacity, recovering from the outage requires **double the system's capacity for another hour** after recovery—or equivalently, normal capacity for two hours.
+
+In practice, several factors can make this even worse:
+
+**Elastic capacity might help**: Services like AWS Lambda can scale elastically, potentially providing more than 2x capacity and enabling faster recovery.
+
+**Dependencies might hurt**: Other systems that your function interacts with might not be prepared to handle a huge increase in processing as you work through the backlog. If your function calls a database that's scaled for normal throughput, the surge of backlog processing might overwhelm the database, slowing your recovery or even causing secondary failures.
+
+**Load patterns matter**: If normal load continues at the same rate during recovery, and you can only muster 1.5x normal capacity instead of 2x, recovery will take longer than the original outage duration.
+
+This creates a stark contrast with synchronous systems:
+
+| System Type | Behavior During Outage | Recovery Time |
+|-------------|------------------------|---------------|
+| **Synchronous** | Drops requests immediately | Quick—no backlog to clear |
+| **Asynchronous** | Builds up backlog | Long—must process backlog |
+
+<Callout type="warning">
+**The Latency Trap**: It's tempting to think latency isn't important for asynchronous systems. After all, they're built for durability and to isolate callers from latency. However, in practice processing time does matter. Even asynchronous systems are often expected to have subsecond or better latency. The hidden risk is dealing with large backlogs that can drive latency to hours or days.
+</Callout>
+
+**Try it yourself:** Experiment with the interactive simulation below to see how queue backlog behavior works in practice.
+
+<QueueSimulator />
+
+## Queue-Based Systems in Practice
+
+Let's examine how two AWS services handle asynchronous processing, illustrating these concepts with real-world architectures.
+
+### AWS Lambda: Asynchronous Invocation
+
+AWS Lambda is a service that executes your code in response to events without requiring you to provision or manage infrastructure. Lambda makes serverless computing practical by handling all the operational complexity of running code reliably at scale.
+
+Lambda supports two invocation modes:
+
+**Synchronous invocation**: The output of your function is returned to you in the HTTP response. The caller waits for the function to complete before receiving a response. This is straightforward but couples the caller's latency to the function's execution time.
+
+**Asynchronous invocation**: The HTTP response returns immediately with an acknowledgment that the request was accepted. Your function is executed and retried behind the scenes, potentially multiple times if there are failures. The caller doesn't wait for execution to complete.
+
+Lambda needs a durable queue to ensure your asynchronous request runs even during server failures. Without this queue, a server crash between receiving the request and executing the function would cause the request to be lost—exactly what serverless computing promises to prevent.
+
+With asynchronous invocations, Lambda's behavior during various failure scenarios illustrates queue backlog challenges:
+
+**Slow function execution**: If your function is slower than normal because of a dependency issue (perhaps a database query that's running slowly), Lambda queues up incoming invocations. When the function starts performing normally again, Lambda works through the backlog of queued invocations.
+
+**Transient failures**: If your function fails because of a transient error (perhaps a timeout calling a downstream service that's experiencing issues), Lambda retries your function. The retry behavior is configurable, but Lambda will keep trying for a period of time before giving up and potentially sending the event to a dead-letter queue.
+
+**Complete outages**: If the Lambda service itself or the infrastructure running your function experiences an outage, invocations queue up. When the outage resolves, Lambda must process both new invocations and the backlog.
+
+The key challenge: How long does it take to work through the backlog and return to normal processing times?
+
+### AWS IoT Core: PubSub Messaging at Scale
+
+AWS IoT Core is a managed service that lets connected devices easily and securely interact with cloud applications and other devices. It handles billions of messages, routing them between millions of devices and AWS services.
+
+IoT Core enables devices and applications to use **PubSub (Publish-Subscribe) messaging**. When a device publishes a message to a topic, all applications and devices with matching subscriptions receive their own copy of the message.
+
+Much of this PubSub messaging happens asynchronously for critical reasons:
+
+**Resource-constrained devices**: A constrained IoT device—perhaps running on battery power with a slow cellular connection—doesn't want to spend its limited resources waiting to ensure that all subscribed devices, applications, and systems receive a copy of its message. The device needs to publish quickly and move on to its next task.
+
+**Offline subscribers**: A subscribed device might be offline when another device publishes a message it's interested in. IoT devices frequently go offline—they might lose network connectivity, power down to conserve battery, or experience intermittent connectivity issues.
+
+**Reconnection expectations**: When an offline device reconnects, it expects to be brought back up to speed. It should receive messages that were published while it was offline, delivered in the correct order. Only after catching up on missed messages should it start receiving new real-time messages.
+
+This creates fascinating queue management challenges. Various flavors of persistence and asynchronous processing happen behind the scenes to make this behavior possible. IoT Core must:
+
+- Queue messages for offline devices
+- Track which messages each device has received
+- Deliver queued messages in order when devices reconnect
+- Handle scenarios where a device's queue grows large during extended offline periods
+- Maintain performance for real-time messages even when processing backlogs
+
+## Measuring Availability and Latency in Asynchronous Systems
+
+How do we measure and set goals for latency and availability in asynchronous services? This question is more complex than it first appears, because different measurement perspectives reveal different aspects of system health.
+
+### Producer-Side Metrics: The First Perspective
+
+Measuring error rates from the producer perspective gives us part of the availability picture. When a producer attempts to enqueue a message, does it succeed or fail? This measurement is straightforward and mirrors traditional availability metrics.
+
+Producer availability is proportional to the **queue service availability itself**. When building on Amazon SQS (Simple Queue Service), your producer availability essentially matches SQS availability. Since SQS is highly available, this measurement typically looks very good.
+
+However, this doesn't tell the whole story. A message successfully enqueued doesn't mean it will be successfully processed, or that it will be processed in a reasonable timeframe. Producer-side metrics are necessary but insufficient for understanding system health.
+
+Producer-observed latency similarly mirrors the latency of the queue service itself. The time to enqueue a message is typically very fast—SQS responses come back in milliseconds. But this doesn't reflect the end-to-end latency from the customer's perspective, which includes both enqueue time and processing time.
+
+### Consumer-Side Metrics: A Misleading View
+
+Measuring availability on the consumer side can make the system look worse than it actually is. Consider what happens when a consumer attempts to process a message:
+
+- The consumer dequeues a message
+- Processing begins but fails due to a transient error
+- The message becomes visible again for retry
+- Another consumer (or the same consumer) tries again
+- This time processing succeeds
+
+From the consumer's perspective, there was one failure and one success. If you measure availability purely based on processing attempts, you'd see a 50% failure rate. But from the system's perspective, the message was ultimately processed successfully—the system did its job, even though it required a retry.
+
+This doesn't mean consumer-side metrics are useless. They're valuable for understanding the health of processing logic and dependencies. But they need to be interpreted carefully and shouldn't be the primary measure of system availability.
+
+### Dead-Letter Queue (DLQ) Metrics: Too Late but Critical
+
+When a message runs out of retries, it's either dropped or put into a **dead-letter queue**. A DLQ is simply a separate queue used to store messages that cannot be processed, preserving them for later investigation and intervention.
+
+The rate of messages being sent to the DLQ is a good availability measurement—it represents work that the system definitively failed to complete. However, DLQ metrics can **detect problems too late**. By the time a message lands in the DLQ, it has already failed multiple retry attempts, potentially over a period of hours or days.
+
+While it's definitely a good idea to alarm on DLQ volumes, DLQ information arrives too late for us to rely on it exclusively to detect problems. By the time the alarm fires, we've already failed to serve customers for that work.
+
+### Age-of-Message Metrics: The Key Insight
+
+The most valuable metric for understanding asynchronous system health focuses on **message age**—how long messages have been waiting in the queue.
+
+Services like SQS provide the timestamp when each message reached the queue. Every time we dequeue a message, we can calculate how old it is by comparing the current time to the enqueue timestamp. Logging and producing metrics on message age quickly catches cases where systems are falling behind or frequently erroring and causing retries.
+
+The basic age metric is straightforward:
+```
+MessageAge = CurrentTime - EnqueueTimestamp
+```
+
+When you graph this metric over time, you can immediately see when backlogs are building. If average message age starts climbing from 100ms to 1 second to 10 seconds to 1 minute, you know you have a growing problem that needs attention before it becomes a crisis.
+
+<Callout type="tip">
+**Age vs. Depth**: Queue depth (number of messages in the queue) is also valuable, but message age is often more meaningful. A queue might have 10,000 messages (large depth), but if they're all very recent and being processed quickly, there's no problem. Conversely, a queue with only 100 messages (small depth) where the oldest is 10 minutes old indicates processing has stalled.
+</Callout>
+
+### Advanced Metrics: Age of First Attempt
+
+The latency problem can be more nuanced in real-world systems. After all, backlogs are sometimes expected and even okay for certain messages. This is particularly true in IoT scenarios.
+
+In AWS IoT, there are times when a device is expected to go offline or to be slow reading its messages. Many IoT devices are low-powered with spotty internet connectivity. A solar-powered weather station might only connect once per hour. A vehicle tracker might lose signal in tunnels or remote areas. A battery-powered sensor might sleep for extended periods to conserve power.
+
+As operators of AWS IoT Core, we need to be able to tell the difference between:
+
+- **Expected backlogs**: Devices that are choosing to be offline or reading messages slowly due to power constraints or connectivity limitations
+- **Unexpected system-wide backlogs**: Problems with IoT Core's processing infrastructure that are affecting all devices
+
+To distinguish these scenarios, AWS IoT instrumented the service with a specialized metric: **AgeOfFirstAttempt**. This measurement records:
+```
+AgeOfFirstAttempt = CurrentTime - EnqueueTime
+```
+
+But critically, it's **only emitted if this is the first time** AWS IoT attempted to deliver a message to a device.
+
+When devices are backed up or offline:
+- Retry attempts don't contribute to this metric
+- Devices that are slowly consuming their message queue don't pollute the metric
+- The metric cleanly reflects whether new messages are being delivered promptly
+
+This creates an early warning system for system-wide problems, filtering out the noise from devices making individual choices about when to process messages.
+
+### Handling PubSub Complexity: First Subscriber Metrics
+
+In a PubSub system like AWS IoT, there's no practical limit to how many devices or applications can subscribe to a particular topic. This creates a challenge for latency measurement:
+
+- Sending a message to 1 subscriber has one latency profile
+- Sending the same message to 1,000,000 subscribers has a very different latency profile
+
+If you measure the time to deliver to all subscribers, the metric becomes less useful as the number of subscribers grows. A message might be delivered instantly to the first subscriber but take minutes to reach all million subscribers.
+
+To get a stable, meaningful metric, AWS IoT emits **AgeOfFirstSubscriberFirstAttempt**—measuring the time from message publication to the first attempt to deliver to the first subscriber of that topic.
+
+This metric provides:
+- **Stable measurement**: Independent of subscriber count
+- **Early warning**: If even the first subscriber isn't getting messages promptly, there's a system problem
+- **Actionable insight**: Problems with this metric indicate issues in the core message routing infrastructure
+
+AWS IoT then uses other metrics to measure progress on publishing the message to the remaining subscribers, understanding that this work may take longer depending on subscriber count.
+
+This strategy of **categorizing latency of first attempts separately from retry attempts** is commonly used across Amazon. It helps separate signal (system problems) from noise (expected retry behavior).
+
+## Backlogs in Multitenant Asynchronous Systems
+
+Many asynchronous systems are multitenant, handling work on behalf of many different customers within the same infrastructure. This adds a complicating dimension to managing latency and availability.
+
+### The Benefits of Multitenancy
+
+Multitenancy provides substantial operational benefits:
+
+**Reduced operational overhead**: Running one fleet that serves all customers is dramatically less complex than separately operating hundreds or thousands of single-tenant fleets. Configuration management, monitoring, alerting, deployments, and capacity planning all become more tractable.
+
+**Higher resource utilization**: Combined workloads typically have more balanced resource usage. When some customers have peak load in the morning and others in the evening, a shared fleet maintains steadier utilization, reducing wasted capacity and costs.
+
+**Faster innovation**: Features and improvements deployed to a single multitenant fleet immediately benefit all customers, rather than requiring separate rollouts to thousands of individual deployments.
+
+### The Challenge: Predictable Single-Tenant Behavior
+
+However, customers expect multitenant systems to behave like their very own single-tenant system. They expect:
+
+- **Predictable latency**: Their workload's performance shouldn't vary based on what other customers are doing
+- **High availability**: Other customers' behavior shouldn't cause outages or degradation for their workload
+- **Fair resource allocation**: They should get their allocated share of system capacity
+
+These expectations are reasonable but challenging to meet, especially in queue-based systems where backlogs can build up quickly.
+
+### Architectural Pattern: API Layer Before Queues
+
+AWS services don't expose their internal queues directly for callers to put messages into. Instead, they implement lightweight APIs to authenticate callers and append caller information to each message before enqueueing.
+
+This is similar to the Lambda architecture described earlier: when you invoke a function asynchronously, Lambda doesn't give you direct access to its internal queues. Instead, you call an API that:
+
+1. Authenticates your request
+2. Validates your input
+3. Attaches metadata (account ID, request ID, timestamps, etc.)
+4. Enqueues the message to Lambda's internal queue
+5. Returns immediately with an acknowledgment
+
+This API layer serves multiple purposes, but critically it enables **fairness throttling**.
+
+### Fairness Throttling: Preventing Noisy Neighbors
+
+Fairness in a multitenant system is important so that no customer's workload impacts another customer. The most common way AWS implements fairness is by setting **per-customer rate-based limits** with some flexibility for bursting.
+
+This works differently than simple throttling in synchronous systems. Consider what could happen without fairness controls:
+
+**The Nightmare Scenario Without Fairness Controls**:
+
+1. Customer A has a bug that causes their application to send requests at 10x their normal rate
+2. This flood of requests goes unthrottled into shared queues
+3. The producer side scales well and queues up all these messages—let's say 30 minutes worth at 10x rate = 300 minutes of work
+4. The consumer side is scaled for normal aggregate capacity (1x)
+5. After 30 minutes, an operator is engaged, identifies the problem customer, and mitigates
+6. But the damage is done—300 minutes of backlog has accumulated
+7. With 1x processing capacity, it takes 300 minutes (5 hours) to clear the backlog
+8. During these 5 hours, ALL customers experience degraded latency
+9. A short 30-minute spike from one customer caused a 5-hour outage for everyone
+
+Even short load spikes can result in **multi-hour recovery times**, causing multi-hour outages for innocent customers.
+
+<Mermaid title="Unthrottled Customer Spike Creating 5-Hour Recovery Backlog" chart={`graph TD
+    A[Customer Spike: 10x rate] --> B[30 min of Unthrottled Load]
+    B --> C[300 min of Work Queued]
+    C --> D[Operator Mitigates Spike]
+    D --> E[But Queue Still Has 300 min Backlog]
+    E --> F[5 Hour Recovery Period]
+    F --> G[All Customers Affected]
+
+    style A fill:#f44336,color:#fff
+    style C fill:#f44336,color:#fff
+    style F fill:#ff9800,color:#fff
+    style G fill:#f44336,color:#fff
+`} />
+
+### Implementing Per-Customer Limits
+
+In many AWS systems, per-customer limits are implemented with flexibility:
+
+**Soft limits with bursting**: Customers can exceed their limit briefly to handle legitimate spikes, but sustained high rates are throttled.
+
+**Organic growth**: As customers grow their usage organically over time, limits increase automatically. The system observes normal usage patterns and adjusts limits accordingly.
+
+**Guardrails, not walls**: Limits serve as guardrails for unexpected spikes, not hard walls that prevent growth. When a customer hits a limit, it triggers backend processes to evaluate whether limits should be raised, while preventing runaway load in the meantime.
+
+**Time for provisioning**: When a customer's legitimate usage approaches their limits, they can request increases. This gives the service team time to make provisioning adjustments behind the scenes before the customer actually needs the capacity.
+
+### Protection at Every Layer
+
+In practice, systems in AWS have numerous compensating factors to minimize or prevent negative impacts from queue backlogs. For example, automatic scaling helps mitigate issues when load increases. But it's helpful to look at queueing effects in isolation, without considering compensating factors, because this helps design systems that are reliable in multiple layers.
+
+Amazon's approach is "belt and suspenders and a pocket protector":
+
+<Callout type="warning">
+**Defense in Depth**: Synchronous systems rely primarily on front-door throttling and admission control to prevent overload. But asynchronous systems need protection at every layer. There will always be some workload that gets around front-door admission control—a spike that happens faster than monitoring can detect, a legitimate increase that bumps up against capacity, or a bug that generates load internally. Each component must protect itself from overload and prevent one workload from consuming an unfair share of resources.
+</Callout>
+
+The strategies for achieving this protection form a comprehensive toolkit that AWS teams apply based on their specific context and requirements.
+
+## Amazon's Strategies for Resilient Multitenant Asynchronous Systems
+
+There are several patterns that systems at Amazon use to make their multitenant asynchronous systems resilient to changes in workloads. These techniques are applied across many systems used throughout Amazon, each with its own set of liveness and durability requirements.
+
+### 1. Separating Workloads into Separate Queues
+
+The simplest isolation approach is to give each customer their own queue. This provides perfect workload isolation—one customer's backlog cannot affect another customer's latency.
+
+**When this works well**: Systems with a handful of customers or adjacent systems. For example, if you have 5 downstream services that feed work to your system, giving each its own queue is straightforward and effective.
+
+**When this doesn't scale**: Systems with thousands or millions of customers. AWS IoT does not use a separate queue for every IoT device in the universe—the polling costs would be prohibitive.
+
+**Polling costs**: With separate queues, consumers must poll each queue to check for messages. If you have 10,000 queues and each must be polled every second, that's 10,000 poll requests per second just to check for work. This overhead becomes significant at scale.
+
+**Implementation considerations**:
+- Use when workload isolation is critical and customer count is manageable (typically < 100)
+- Monitor polling overhead as customer count grows
+- Consider hybrid approaches (separate queues for high-value customers, shared queues for others)
+
+### 2. Shuffle-Sharding: Bounded Isolation with Fixed Queue Count
+
+AWS Lambda demonstrates an elegant solution to the separate queue scaling problem. Lambda provisions a **fixed number of queues** (let's say 100 queues for illustration), and hashes each customer to a **small number of those queues** (perhaps 3-4 queues).
+
+The process works like this:
+
+1. When a message arrives for Customer A, Lambda computes a hash of the customer ID
+2. This hash maps the customer to 3-4 specific queues (e.g., queues #7, #23, #56, #91)
+3. Before enqueueing, Lambda checks which of those targeted queues contains the fewest messages
+4. The message goes into the least-full queue from the customer's set
+
+**Why this is powerful**:
+
+When one customer's workload increases and drives a backlog:
+- Their messages fill up their mapped queues
+- Other customers are hashed to different queues
+- Messages for other customers automatically route away from the backlogged queues
+- The problem customer's load is contained to their queue set
+
+**The math of isolation**: It doesn't take a large number of queues to build meaningful resource isolation. With 100 queues and each customer mapped to 4 queues:
+- Two randomly selected customers have only a ~4% chance of sharing all 4 queues
+- The probability that a spike from one customer affects another specific customer is very low
+- The probability that a spike affects a significant fraction of customers is negligible
+
+<Mermaid title="Shuffle Sharding: Customers Hashed to Subsets of Queues" chart={`graph TD
+    C1[Customer 1<br/>Hash: 7,23,56,91] --> Q7[Queue 7]
+    C1 --> Q23[Queue 23]
+
+    C2[Customer 2<br/>Hash: 3,23,45,78] --> Q3[Queue 3]
+    C2 --> Q23
+
+    C3[Customer 3<br/>Hash: 12,34,56,89] --> Q12[Queue 12]
+    C3 --> Q56[Queue 56]
+
+    Q7 --> P[Processor Pool]
+    Q23 --> P
+    Q3 --> P
+    Q12 --> P
+    Q56 --> P
+
+    style Q23 fill:#ffeb3b,color:#1a1a1a
+`} />
+
+Queue 23 happens to be shared between customers 1 and 2, but most queues are isolated. A noisy customer impacts only the small subset they hash to.
+
+This is only one of many protections built into Lambda, but it's a technique used in other services at Amazon as well. Shuffle-sharding provides probabilistic isolation without the operational overhead of per-customer infrastructure.
+
+### 3. Sidelining Excess Traffic to a Separate Queue
+
+In some ways, when a backlog has built up in a queue, it's too late to prioritize traffic—the damage is done. However, if processing the message is relatively expensive or time-consuming, it may still be worthwhile to move messages to a separate **spillover queue**.
+
+**How it works**:
+
+1. The consumer service implements distributed throttling
+2. When dequeuing messages, the consumer checks: Has this customer exceeded their configured rate?
+3. If yes, the consumer enqueues those excess messages into separate spillover queues
+4. The consumer deletes the messages from the primary queue
+5. The system works through spillover queue messages as soon as resources are available
+
+This effectively creates a **priority queue** without requiring special queue features:
+- Primary queue: Contains messages within rate limits—processed immediately
+- Spillover queue: Contains messages over rate limits—processed when capacity allows
+
+**Similar logic can apply on the producer side**: If a system accepts a large volume of requests from a single workload, that workload doesn't crowd out other workloads in the hot path queue. Excess requests go directly to spillover.
+
+**When to use this approach**:
+- Processing messages is expensive (seconds to minutes per message)
+- The cost of extra queue operations is justified by the value of prioritization
+- You need to maintain responsiveness for messages within rate limits
+
+### 4. Sidelining Old Traffic to a Separate Queue
+
+Similar to sidelining excess traffic by rate, we can sideline by **age**. This addresses a different problem: ensuring fresh data gets processed promptly even when a backlog exists.
+
+**How it works**:
+
+1. When dequeuing a message, check how old it is
+2. Rather than just logging the age, use it to make routing decisions
+3. If the message is older than a threshold (e.g., 5 minutes), move it to a **backlog queue**
+4. Work through the backlog queue only after catching up on the live queue
+
+**Handling load spikes**:
+
+If there's a load spike where the system ingests a lot of data and falls behind:
+1. The wave of old traffic gets sidelined to the backlog queue
+2. This happens as quickly as the system can dequeue and re-enqueue
+3. Consumer resources are freed up to work on fresh messages
+4. Fresh messages get processed much more quickly than if working the backlog in order
+5. Once caught up, the system processes the backlog during idle capacity
+
+This is one way to approximate **LIFO (Last-In-First-Out) ordering**, which many real-time systems prefer despite using FIFO queues.
+
+**Why LIFO matters for real-time systems**: When customers at Amazon talk about their preferences during backlogs, they often say they prefer to see fresh data processed immediately. Any data accumulated during an outage or surge can be processed as capacity becomes available. A weather monitoring system wants the current temperature displayed now, not the temperature from 2 hours ago (which happens to be first in the queue).
+
+### 5. Dropping Old Messages (Message Time-to-Live)
+
+Some systems can tolerate very old messages being dropped entirely. This is most common in systems with **anti-entropy mechanisms**.
+
+**Anti-entropy pattern**: Systems that process deltas (changes) quickly but also do periodic full synchronization. The periodic synchronization corrects any errors or missed updates, providing eventual consistency.
+
+For example:
+- A system might process individual data changes as they occur
+- But also run a full reconciliation sweep every hour
+- If a delta message is older than the most recent sweep, it's redundant
+
+**Implementation**: Instead of sidelining old queued traffic, cheaply drop it if it arrived before the most recent anti-entropy sweep.
+
+**When to use**:
+- Your system has periodic full synchronization
+- Individual messages become irrelevant after synchronization
+- The cost of processing old messages outweighs their value
+
+<Callout type="info">
+**TTL Considerations**: Be very careful with message dropping. Ensure you have mechanisms to verify that data consistency is maintained. Use TTL only when you have strong guarantees (like anti-entropy sweeps) that prevent data loss.
+</Callout>
+
+### 6. Limiting Threads and Resources per Workload
+
+Much as in synchronous services, Amazon designs asynchronous systems to prevent one workload from using more than its fair share of threads and other concurrency-related resources.
+
+**The problem: Little's Law**
+
+Little's Law describes a fundamental relationship in queueing theory:
+```
+Concurrency = Arrival Rate × Average Latency
+```
+
+Consider a concrete example:
+
+**Normal operation**:
+- Server processes 100 messages/second
+- Each message takes 100ms on average
+- Concurrency = 100 × 0.1 = 10 threads
+
+**Latency spike scenario**:
+- Arrival rate stays at 100 messages/second
+- Latency spikes to 10 seconds (perhaps a downstream database is slow)
+- Concurrency = 100 × 10 = 1,000 threads
+- This could easily exhaust a thread pool configured for normal operation
+
+Without protection, one workload experiencing downstream latency issues could consume all available threads, starving other workloads.
+
+**AWS IoT Rules Engine: A Case Study**
+
+The AWS IoT rules engine allows customers to route messages from their devices to customer-owned resources like Amazon Elasticsearch clusters, Kinesis streams, and other services.
+
+If the latency to those customer-owned resources becomes slow while incoming message rate remains constant, the amount of concurrency in the system increases (per Little's Law). Because concurrency is limited at any instant in time, the rules engine must prevent any one workload from consuming more than its fair share of concurrency-related resources.
+
+**Protection mechanisms used**:
+
+**Non-blocking I/O**: Avoid thread exhaustion by using asynchronous I/O patterns. However, there are still other limits to how much work a server can handle—memory, file descriptors (especially when clients are churning through connections), CPU for managing async operations.
+
+**Per-workload semaphores**: Use a semaphore that measures and limits the amount of concurrency that can be used for any single workload at any instant. For example, no single customer can use more than 100 concurrent connections to their Elasticsearch cluster.
+
+**Rate-based fairness limiting**: Traditional rate limiting (requests per second) provides another layer of protection.
+
+**Automatic scaling of limits**: Because workloads legitimately change over time, the rules engine automatically scales limits to adapt to changing customer needs.
+
+**Queue buffering**: The queue-based architecture serves as a buffer between IoT devices and the automatic scaling of resources and limits behind the scenes.
+
+**Separate thread pools**: Across services at Amazon, teams commonly use separate thread pools for each workload to avoid one workload consuming all available threads.
+
+**AtomicInteger per workload**: Use an AtomicInteger counter for each workload to track and limit allowed concurrency.
+
+These techniques combine to ensure that latency issues with one customer's downstream resources don't impact other customers.
+
+### 7. Sending Backpressure Upstream
+
+If a workload is driving an unreasonable backlog that the consumer is unable to keep up with, many Amazon systems automatically start rejecting work more aggressively at the producer.
+
+**Why this matters**: It's easy to accidentally build up a day-long backlog for a workload. Even if that workload is isolated (using techniques described above), the backlog may be accidental. It's expensive to churn through a day's worth of queued messages, especially if the customer didn't intend to generate that much work.
+
+**Implementation approach**:
+
+1. Periodically measure the queue depth for a workload (assuming the workload has its own queue)
+2. Scale the inbound throttle limit inversely proportional to backlog size
+3. As the backlog grows, throttle the inbound rate more aggressively
+4. As the backlog shrinks, relax the throttle limits
+
+For example:
+```
+ThrottleLimit = BaseLimit × (TargetDepth / CurrentDepth)
+
+If BaseLimit = 1000 req/sec and TargetDepth = 1000 messages:
+  CurrentDepth = 1,000 → ThrottleLimit = 1,000 req/sec (normal)
+  CurrentDepth = 10,000 → ThrottleLimit = 100 req/sec (10x backlog → 10x throttle)
+  CurrentDepth = 100,000 → ThrottleLimit = 10 req/sec (100x backlog → 100x throttle)
+```
+
+**Challenges with shared queues**: When sharing an SQS queue for multiple workloads, this approach gets tricky. SQS provides an API that returns the number of messages in the queue, but there's no API that returns the count of messages with a particular attribute (like customer ID).
+
+You could still measure overall queue depth and apply backpressure, but it would unfairly put backpressure on innocent workloads sharing the queue. Other systems like Amazon MQ have finer-grained backlog visibility that makes per-workload backpressure more feasible.
+
+**Context matters**: Backpressure isn't suitable for all systems at Amazon. For example, in systems performing order processing for amazon.com, we prefer to accept orders even if a backlog builds up, rather than preventing new orders from being accepted. But this is accompanied with extensive prioritization behind the scenes so that the most urgent orders (next-day delivery, items needed soon) are handled first.
+
+### 8. Using Delay Queues to Put Off Work Until Later
+
+When systems sense that throughput for a particular workload needs to be reduced, they can use backoff strategies implemented with SQS delay features.
+
+**How delay queues work**: SQS allows you to set a delay parameter when enqueuing a message. The message stays hidden on the queue for the specified delay period before becoming visible to consumers.
+
+**Implementation pattern**:
+
+1. Process a message and determine it should be delayed (customer is over rate limit, or the message is low priority)
+2. Re-enqueue the message into a separate **surge queue** with a delay parameter
+3. Set the delay for several minutes (e.g., 5 minutes)
+4. Delete the message from the primary queue
+5. The surge queue message stays hidden for 5 minutes
+6. After the delay, it becomes visible and can be processed
+
+**Why this helps**: During the delay period, the system has a chance to work on fresher data or higher-priority work instead of immediately retrying the delayed message. This provides a form of priority-based scheduling using simple queue primitives.
+
+### 9. Avoiding Too Many In-Flight Messages
+
+Some queue services like SQS have limits on how many **in-flight messages** can be delivered to the consumer of the queue. This is different from the number of messages that can be in the queue (for which there is no practical limit in SQS).
+
+**In-flight messages**: Messages that have been delivered to a consumer but not yet deleted. SQS tracks these separately because the consumer is actively working on them—they're no longer visible to other consumers, but they're not yet fully processed.
+
+**How messages become in-flight**:
+
+1. Consumer calls ReceiveMessage
+2. SQS returns a message and makes it invisible to other consumers
+3. Message is now "in-flight"
+4. Consumer processes the message
+5. Consumer calls DeleteMessage
+6. Message is no longer in-flight
+
+**The problem**: Messages can remain in-flight if:
+- Consumer dequeues messages but forgets to delete them
+- Code fails to catch an exception and doesn't reach the delete call
+- Consumer crashes after dequeuing but before deleting
+
+When this happens, messages remain in-flight from SQS's perspective for the message's **VisibilityTimeout** (often 30 seconds to 12 hours). If enough messages get stuck in-flight, you can hit SQS's limit on in-flight messages, preventing the queue from delivering more messages to consumers.
+
+**Design considerations**:
+
+When designing error handling and overload strategy:
+- Keep in-flight limits in mind
+- Favor moving excess messages to different queues instead of letting them remain visible and timing out
+- Ensure exception handling always attempts to delete or change message visibility
+- Monitor in-flight message counts and alarm on high values
+
+**SQS FIFO queues have a subtle variation**: With SQS FIFO, systems consume messages in order for a given message group, but messages from different groups are processed in any order.
+
+If you develop a small backlog in one message group, other groups continue processing. However, SQS FIFO only polls the **most recent unprocessed 20,000 messages**. If more than 20,000 unprocessed messages exist in a subset of message groups, other message groups with fresh messages will be starved out—they're beyond the 20K window that SQS is examining.
+
+### 10. Using Dead-Letter Queues for Messages That Can't Be Processed
+
+Messages that cannot be processed can contribute to system overload. If a message triggers a bug (perhaps an input validation edge case that throws an exception), the message will be retried repeatedly, consuming resources without making progress.
+
+**Dead-letter queue (DLQ) pattern**:
+
+1. Configure SQS to move messages to a DLQ after a specified number of processing attempts (e.g., 5 retries)
+2. If a message fails 5 times, SQS automatically moves it to the DLQ
+3. The message is preserved in the DLQ for investigation
+4. Alarm when any messages appear in the DLQ
+5. Investigate and fix the bug that prevented processing
+6. Re-process the DLQ messages after the fix is deployed
+
+**Benefits**:
+
+**Prevent resource waste**: Messages that can't be processed stop consuming processing resources after a reasonable number of retries.
+
+**Preserve data**: The messages aren't lost—they're available for investigation and reprocessing.
+
+**Detect bugs**: DLQ alarms indicate bugs that need fixing, often bugs that are triggered by specific input patterns that weren't covered by tests.
+
+**Enable recovery**: After fixing the bug, you can re-drive messages from the DLQ through your processing pipeline, ensuring no data is lost.
+
+### 11. Ensuring Additional Buffer in Polling Threads per Workload
+
+If a workload is driving enough throughput that polling threads are busy all the time—even during steady state—the system might have reached a point where there's no buffer to absorb a surge in traffic.
+
+**The problem**: When polling threads are fully saturated, a small spike in incoming traffic will immediately lead to a sustained backlog, resulting in higher latency.
+
+**Measurement strategy**: Track the number of polling attempts that result in empty responses.
+
+**What this tells you**:
+
+**Many empty polls**: You have excess polling capacity—there's buffer to absorb load spikes.
+
+**Few empty polls**: Every polling attempt is retrieving one or more messages. This could mean:
+- You have exactly the right number of polling threads (ideal steady state)
+- You don't have enough polling threads to keep up with incoming traffic (problematic)
+
+**No empty polls for extended periods**: Definite problem—you're falling behind and need more polling capacity.
+
+**Planning for buffer**: Design your polling fleet to have some excess capacity. A good rule of thumb is to provision enough polling threads that you see at least 10-20% empty polls during normal operation. This provides headroom for load spikes without immediately building backlogs.
+
+### 12. Heartbeating Long-Running Messages
+
+When a system processes an SQS message, SQS gives that system a certain amount of time (the **VisibilityTimeout**) to finish processing the message before assuming the system crashed. If processing doesn't complete within the timeout, SQS assumes something went wrong and delivers the message to another consumer to try again.
+
+**The fork-bomb scenario**: If code keeps running and forgets about the VisibilityTimeout deadline, the same message can be delivered multiple times in parallel:
+
+1. Consumer A dequeues Message X at time T0 (VisibilityTimeout = 30 seconds)
+2. Consumer A starts processing but takes 45 seconds
+3. At T0 + 30s, SQS's timeout expires
+4. Consumer B dequeues Message X at T0 + 30s
+5. Consumer B also takes 45 seconds
+6. At T0 + 60s, SQS's timeout expires again
+7. Consumer C dequeues Message X at T0 + 60s
+8. And so on...
+
+This creates a **cascading brownout**. An already overloaded service experiencing high latency essentially fork-bombs itself, with the same work being attempted by more and more consumers in parallel.
+
+<Callout type="warning">
+**The Insidious Nature of the Fork-Bomb**: This problem is especially insidious because system latency is likely to increase during overload—perhaps queries to a database take longer, or servers are taking on more work than they can handle. When latency crosses the VisibilityTimeout threshold during overload, it amplifies the overload by spawning duplicate work.
+</Callout>
+
+**Solution: Heartbeating**
+
+Implement message processing logic to handle long-running operations:
+
+**Option 1: Stop work when messages expire**
+```python
+def process_message(message, deadline):
+    while has_more_work() and time.now() < deadline:
+        do_chunk_of_work()
+
+    if time.now() >= deadline:
+        # Don't delete the message, let SQS redeliver
+        log("Processing exceeded deadline, will retry")
+        return
+
+    delete_message(message)
+```
+
+**Option 2: Heartbeat to extend the deadline**
+```python
+def process_long_running_message(message):
+    last_heartbeat = time.now()
+
+    while has_more_work():
+        do_chunk_of_work()
+
+        if time.now() - last_heartbeat > 20:  # Heartbeat every 20 seconds
+            extend_visibility_timeout(message, 30)  # Extend by 30 more seconds
+            last_heartbeat = time.now()
+
+    delete_message(message)
+```
+
+This concept is similar to leases in leader election algorithms—you must either finish within your lease period or actively renew the lease. This prevents the fork-bomb scenario and maintains system stability even during periods of elevated latency.
+
+## Cross-Cutting Concerns: Debugging and Visibility
+
+### Distributed Tracing
+
+Understanding failures in distributed asynchronous systems is already difficult. Messages bounce between servers, can be delayed in various places, and might be processed much later than they were created.
+
+**Propagate trace IDs**: Include a unique request ID or trace ID in queued messages. As messages move through the system, propagate this ID to all related operations. This allows piecing together the complete journey of a message across multiple systems and time periods.
+
+**Use OpenTelemetry with X-Ray**: Instrument your applications with OpenTelemetry, the industry-standard observability framework, to collect distributed traces. AWS X-Ray serves as the backend visualization service for analyzing these traces. OpenTelemetry provides vendor-neutral instrumentation that helps track requests as they flow through distributed systems, providing visibility into where time is spent and where failures occur. (Note: AWS X-Ray SDKs were deprecated in 2025 in favor of OpenTelemetry instrumentation.)
+
+**Correlate logs**: Ensure logs from different systems can be correlated using trace IDs. When investigating an issue, you can search logs across all systems involved in processing a message.
+
+### Queue Depth Metrics
+
+Record queue depths periodically and graph them over time. Sudden increases in queue depth indicate:
+- Arrival rate has increased
+- Processing rate has decreased
+- Something is wrong and needs investigation
+
+### Workflow Orchestration
+
+When asynchronous workflows become complicated (multiple steps, branching logic, parallel processing), consider using workflow orchestration services like AWS Step Functions. These provide:
+- Visual representation of workflow state
+- Built-in retry logic
+- Visibility into which step is executing
+- Simplified distributed debugging
+
+## Conclusion
+
+Queues are powerful tools for building durable, reliable asynchronous systems, but they come with subtle risks that can turn availability improvements into availability disasters. The bimodal nature of queue-based systems—fast mode when there's no backlog, slow mode when backlogs accumulate—means that recovery from failures can take much longer than the original failure itself.
+
+In an asynchronous system, it's easy to forget how important latency is. After all, asynchronous systems are supposed to occasionally take longer because they're fronted by queues for performing reliable retries. However, overload and failure scenarios can build up huge insurmountable backlogs from which a service cannot recover in a reasonable amount of time.
+
+These backlogs can come from multiple sources:
+- One workload or customer enqueueing at an unexpectedly high rate
+- Workloads becoming more expensive than predicted to process
+- Latency or failures in dependencies slowing processing
+- Cascading effects from Little's Law (concurrency = rate × latency)
+
+When building an asynchronous system, we need to focus on and anticipate these backlog scenarios and minimize them by using multiple complementary techniques:
+
+**Isolation techniques**: Separate queues, shuffle-sharding
+**Prioritization techniques**: Sidelining excess traffic, sidelining old traffic, LIFO approximation
+**Load control techniques**: Backpressure, delay queues, fairness throttling
+**Resource management**: Thread limiting, avoiding in-flight message limits
+**Operational excellence**: Heartbeating, DLQs, distributed tracing, comprehensive metrics
+
+Success requires thinking about these challenges from the beginning of system design, not as an afterthought when problems appear. The strategies described in this lesson represent years of learning from real-world failures and operational experience across Amazon and AWS. By applying these patterns thoughtfully based on your specific context, you can build asynchronous systems that provide the durability and reliability benefits of queues without succumbing to insurmountable backlogs.
+
+<KeyTakeaways>
+- **Queues have bimodal behavior**: Fast mode with no backlog versus slow mode with backlogs requiring 2x capacity for recovery duration equal to the original outage period
+- **Measure age of first attempts**: Filter out expected backlogs (like offline IoT devices) from system-wide problems using specialized metrics like `AgeOfFirstAttempt` that only track first delivery attempts
+- **Protection at every layer**: Asynchronous systems need multiple layers of defense—front-door throttling, per-workload limits, shuffle-sharding, and backpressure—because some workloads will always bypass initial controls
+- **Prioritize fresh data over backlog**: Use spillover queues, sideline old traffic, and implement TTL to focus processing on recent data. Real-time systems prefer LIFO-ish behavior despite using FIFO queues
+- **Prevent cascade failures**: Limit threads per workload using Little's Law principles, heartbeat long-running messages to prevent fork-bombs, use DLQs for poison messages, and avoid hitting in-flight message limits
+- **Multitenant isolation is critical**: Use shuffle-sharding to provide probabilistic isolation between customer workloads without the cost of fully separate infrastructure, preventing noisy neighbor problems
+- **Distributed tracing is essential**: Propagate trace IDs through queued messages and use OpenTelemetry instrumentation with backends like AWS X-Ray to understand message flows across system boundaries and time delays
+- **Test backlog scenarios**: Don't just test happy-path performance. Deliberately create backlogs in test environments to validate your overflow, prioritization, and recovery mechanisms work as designed
+</KeyTakeaways>

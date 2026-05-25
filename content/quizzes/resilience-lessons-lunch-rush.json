@@ -1,0 +1,60 @@
+{
+  "lessonSlug": "resilience-lessons-lunch-rush",
+  "questions": [
+    {
+      "question": "Your service is experiencing a sudden traffic spike. You observe that as request rate increases beyond a certain point, successful completions actually decrease. What phenomenon is occurring and what is the appropriate response?",
+      "options": [
+        "The system is scaling up—wait for auto-scaling to complete",
+        "The system has hit the tipping point where additional load lowers goodput—implement load shedding to maintain consistent successful completions",
+        "The clients need to retry more aggressively to overcome transient errors",
+        "The database is the bottleneck—add read replicas immediately"
+      ],
+      "correctIndex": 1,
+      "explanation": "When successful completions (goodput) decrease as offered load increases, the system has passed its tipping point. Beyond this threshold, accepting new work, queuing it, and context switching actually reduce the system's ability to complete work within client timeout. Load shedding—intentionally discarding work temporarily—keeps goodput flat and prevents the system from becoming completely overwhelmed while you scale or address the root cause."
+    },
+    {
+      "question": "You're designing a configuration distribution system where 10,000 data plane servers need updates from 100 control plane servers. Which approach aligns with the 'smaller service in control' principle?",
+      "options": [
+        "Data plane servers poll the control plane every few seconds for configuration changes",
+        "Control plane pushes configuration updates to all data plane servers whenever changes occur",
+        "Data plane servers subscribe to a pub/sub topic managed by the control plane",
+        "Both fleets query a shared database for the latest configuration"
+      ],
+      "correctIndex": 1,
+      "explanation": "The 'smaller service in control' principle says to push from the smaller fleet to the larger fleet. Having the control plane (100 servers) push to the data plane (10,000 servers) prevents the larger data plane from overwhelming the smaller control plane with 10,000 simultaneous pull requests. This allows the control plane to manage update rate, convergence, and inventory of data plane nodes."
+    },
+    {
+      "question": "Your application uses a constant work pattern, polling an S3 bucket every 5 seconds for configuration regardless of whether it changed. Your manager is concerned about wasted work and cost. What is the PRIMARY architectural benefit that justifies this approach?",
+      "options": [
+        "S3 requests are free so there's no cost concern",
+        "The system performs the same amount of work in all conditions, providing predictable load without spikes and natural self-healing when transient errors occur",
+        "Polling is always faster than event-driven architectures",
+        "It eliminates the need for monitoring and alarms"
+      ],
+      "correctIndex": 1,
+      "explanation": "Constant work's primary benefit is predictable load and natural self-healing. The system always operates in 'repair everything' mode—if a configuration was corrupted or an update was missed, the next poll cycle corrects it automatically without building up backlogs. This predictability and automatic correction typically offset the cost of performing work when nothing changed. While there is a cost, it's usually negligible compared to building complex event-driven systems with retry logic and state machines."
+    },
+    {
+      "question": "You implement a circuit breaker for a dependency that partitions data across three shards (A-H, I-R, S-Z). Shard A-H becomes overloaded and starts timing out. Your circuit breaker trips and blocks ALL requests to the dependency. What is the problem with this implementation?",
+      "options": [
+        "Circuit breakers should never be used with partitioned dependencies",
+        "The circuit breaker is too coarse-grained—it's blocking requests to healthy shards I-R and S-Z, making a small problem (one shard) into a large problem (all shards)",
+        "Circuit breakers should trip on error rate, not latency",
+        "The backoff period is too short"
+      ],
+      "correctIndex": 1,
+      "explanation": "This circuit breaker is improperly scoped. It treats the entire dependency uniformly instead of aligning to the dependency's fault domains (shards). When shard A-H fails, requests to I-R and S-Z could succeed, but the whole-dependency circuit breaker unnecessarily rejects them. AWS aligns circuit breakers to expected fault domains—in this case, you'd want three circuit breakers (one per shard) so failure in A-H only blocks that shard while I-R and S-Z continue serving requests."
+    },
+    {
+      "question": "In a three-tier service call chain (Service A → Service B → Service C), each service retries failed requests up to 2 times (1 original + 2 retries). How many total requests could Service C receive for a single request from Service A?",
+      "options": [
+        "3 requests (1 original + 2 retries)",
+        "6 requests (3 × 2)",
+        "9 requests (3²)",
+        "27 requests (3³)"
+      ],
+      "correctIndex": 2,
+      "explanation": "Work amplification in retry storms follows k^n where k is retries per node and n is call chain depth. With 3 requests per service (1 + 2 retries) across 2 hops: Service A makes 3 requests to B, each of B's 3 requests makes 3 to C, resulting in 3² = 9 requests to Service C. This demonstrates why adaptive retries with retry quotas are essential—they prevent overwhelming dependencies during failures by limiting retries based on success rate."
+    }
+  ]
+}

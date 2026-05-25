@@ -1,0 +1,547 @@
+# Advanced Multi-AZ Resilience Patterns: Detecting and Mitigating Gray Failures
+
+## Introduction: When Binary Detection Fails
+
+Multi-Availability Zone architectures excel at handling clear failures. When an entire zone becomes unavailable, systems respond appropriately: load balancers detect failed health checks within seconds, Auto Scaling maintains capacity in healthy zones, and customers experience minimal or zero impact. These are **binary failures**—a component is either working or not working, with clear signals that automated systems can detect and respond to.
+
+However, there exists a more insidious category of problems: **gray failures**. These failures manifest subtly, resist quick detection, and can persist for extended periods without triggering standard failover mechanisms. A networking issue might cause 30% of connections to fail while 70% succeed. A degraded disk might slow specific operations without failing health checks. A software bug might affect only certain request patterns. In all these cases, the problem is real and impacting customers, but standard binary detection mechanisms fail to identify it.
+
+Gray failures represent one of the most difficult challenges in building resilient systems. They sit in the space between "working" and "failed," creating differential observability—different parts of the system see different realities. Your monitoring might report everything is healthy while your customers are experiencing significant degradation. This disconnect can lead to extended outages, frustrated customers, and difficult debugging sessions trying to understand what went wrong.
+
+This lesson explores advanced patterns for detecting gray failures isolated to single Availability Zones, implementing evacuation strategies that minimize customer impact, and building the sophisticated observability required to identify problems that hide from traditional monitoring. These techniques require significant engineering investment but can dramatically improve resilience for critical workloads where availability targets demand it.
+
+<Callout type="warning">
+The patterns in this lesson apply to specific workload classes: those primarily using zonal AWS services, those needing to improve single-Region resilience, and those willing to make significant investments in observability and resilience tooling. For most workloads, simpler multi-AZ patterns combined with good operational practices provide sufficient resilience. Evaluate whether your availability requirements justify the additional complexity before implementing these advanced patterns.
+</Callout>
+
+## Understanding Gray Failures and Differential Observability
+
+Gray failures are defined by a critical characteristic: **differential observability**—different entities observe the failure differently. This makes them particularly difficult to detect and respond to.
+
+### The Observability Quadrant
+
+Consider a typical dependency relationship in distributed systems. A system (perhaps an AWS service or your own infrastructure component) implements monitoring, recording metrics about errors, availability, and latency. The system watches these metrics and takes corrective action when thresholds are breached—perhaps restarting processes, redistributing load, or scaling capacity.
+
+Meanwhile, applications consuming this system implement their own observability, recording metrics about their interactions with the dependency—connection failures, request latencies, error rates. Ideally, both perspectives align: when the system is healthy, consumers see healthy metrics; when the system is unhealthy, both the system and consumers detect the problem.
+
+Gray failures break this alignment. The system might report healthy metrics while consumers experience degradation, creating four possible states:
+
+| System's View | Consumer's View | Classification | Description |
+|---------------|-----------------|----------------|-------------|
+| Healthy | Healthy | **Normal Operation** | Everything working correctly |
+| Unhealthy | Unhealthy | **Detected Failure** | Problem detected, automated responses trigger |
+| Unhealthy | Healthy | **Masked Failure** | System sees issues but impact doesn't reach consumers |
+| Healthy | Unhealthy | **Gray Failure** | Consumers impacted but system monitoring doesn't detect |
+
+The fourth state—gray failure—is the most problematic. The system's automated responses don't trigger because from its perspective, everything is within normal parameters. Yet consumers are experiencing real degradation that impacts their users and applications.
+
+### A Concrete Example
+
+Imagine a system serving three applications with an average latency of 53ms and an alarm configured to trigger at 60ms. If App 1's latency increases from 50ms to 70ms while Apps 2 and 3 remain at 53ms and 56ms respectively:
+
+**From App 1's perspective**: 40% latency increase (50ms → 70ms). This might exceed configured client timeouts, cause cascading delays in request chains, or trigger customer-visible errors. The system is clearly failing.
+
+**From the system's perspective**: Average latency increased from 53ms to 59.66ms. Still below the 60ms alarm threshold. All metrics are green. The system is healthy and no automated response triggers.
+
+**From Apps 2 and 3's perspective**: No change. Latency remains normal at 53ms and 56ms. The system is working fine.
+
+Three different perspectives, three different realities. App 1 needs help but isn't getting it because the system's aggregate view masks the individual problem.
+
+<Mermaid title="Per-App vs System-Average Latency Monitoring" chart={`graph TB
+    subgraph System Monitoring
+        SysAvg["Avg Latency: 59.66ms"]
+        SysThresh["Threshold: 60ms"]
+        SysStatus["Status: HEALTHY"]
+    end
+    subgraph App 1 Monitoring
+        A1Lat["Latency: 70ms"]
+        A1Impact["Impact: SEVERE"]
+        A1Status["Status: DEGRADED"]
+    end
+    subgraph App 2 Monitoring
+        A2Lat["Latency: 53ms"]
+        A2Status["Status: HEALTHY"]
+    end
+    subgraph App 3 Monitoring
+        A3Lat["Latency: 56ms"]
+        A3Status["Status: HEALTHY"]
+    end
+
+    style SysStatus fill:#90ee90,color:#1a1a1a
+    style A1Status fill:#ff6b6b,color:#fff
+    style A2Status fill:#90ee90,color:#1a1a1a
+    style A3Status fill:#90ee90,color:#1a1a1a
+`} />
+
+### Real-World Multi-AZ Gray Failure
+
+Consider a practical scenario: EC2 instances in an Auto Scaling group deployed across three Availability Zones (use1-az1, use1-az2, use1-az3), connecting to an Aurora database primary in use1-az2. A networking issue affects connectivity between use1-az1 and use1-az2, causing a percentage of database connections from use1-az1 instances to fail.
+
+**What standard monitoring sees**:
+- **EC2**: Instances in use1-az1 pass system and instance status checks (they're running normally)
+- **Auto Scaling**: No direct impact detected, continues launching capacity according to configured policies
+- **Load Balancer**: Instances respond to health checks (HTTP 200 OK on /health endpoint)
+- **Route 53**: Health checks against the load balancer pass
+- **RDS**: Database cluster appears healthy, no automatic failover triggered
+
+**What actually happening**:
+- Instances in use1-az1 experience intermittent database connection failures
+- Application error rate from use1-az1 instances: 25-40%
+- Application error rate from use1-az2 instances: &lt;1%
+- Application error rate from use1-az3 instances: &lt;1%
+- Overall application error rate: ~10% (distributed across zones)
+
+Multiple AWS services report healthy status. Their automated detection mechanisms see nothing wrong. Yet the workload experiences significant availability impact, with customers seeing errors and degraded service. This is a textbook gray failure.
+
+### Why Gray Failures Are Hard to Handle
+
+Several factors make gray failures particularly challenging:
+
+**Insufficient signal strength**: Aggregate metrics dilute the signal. A problem affecting 33% of your infrastructure might only move aggregate metrics by 10-15%, which might be within normal variance.
+
+**Threshold calibration difficulty**: Set thresholds too sensitive and you get false positives from normal variance. Set them too loose and gray failures slip through. The "correct" threshold might not exist for aggregate metrics.
+
+**Delayed detection**: Without specific monitoring for gray failures, detection relies on escalating symptoms. By the time aggregate metrics cross thresholds, customers have already experienced extended degradation.
+
+**Complex mitigation**: Even after detection, mitigation is unclear. Should you restart services? Scale capacity? Evacuate an AZ? Without understanding the failure mode, choosing the right response is difficult.
+
+The conclusion: workloads can't always rely on underlying systems to detect and mitigate failures. No matter how sophisticated the infrastructure, differential observability means consumer-side detection and mitigation capabilities are essential for critical workloads.
+
+## Building Multi-AZ Observability for Gray Failure Detection
+
+Detecting gray failures requires high-fidelity visibility into how your system behaves in each Availability Zone. Standard AWS infrastructure metrics (CPU utilization, disk I/O, network traffic) provide operational insights but don't directly measure customer experience or align to fault isolation boundaries.
+
+### The Principles of Effective Instrumentation
+
+**Measure customer experience, not just infrastructure**: Instrument your application code to record what actually matters—request success/failure, latency percentiles, business transaction completion, data consistency, user-visible errors. Infrastructure metrics tell you what your servers are doing; application metrics tell you what your customers are experiencing.
+
+**Align metrics to fault isolation boundaries**: Use dimensions that correspond to how failures actually manifest. For multi-AZ architectures, critical dimensions include:
+- **Region**: AWS Region where the resource operates
+- **AZ-ID**: Availability Zone ID (use1-az1, not the AZ name us-east-1a)
+- **Resource identifier**: Instance ID, container ID, Lambda function invocation ID
+- **Functional component**: Controller/action, microservice name, API method
+
+Why AZ-ID instead of AZ name? Availability Zone names (us-east-1a, us-east-1b) are account-specific. The physical Availability Zone that maps to "us-east-1a" in one AWS account might map to "us-east-1b" in another account. AZ-IDs (use1-az1, use1-az2) are consistent across all accounts in a Region, enabling correlation across accounts and comparison with AWS service metrics.
+
+**Generate metrics from multiple vantage points**: Server-side instrumentation captures what your application observes. Client-side canaries capture what a typical customer experiences. Combining both perspectives provides comprehensive coverage—you can detect issues that affect real requests even if your application's internal metrics look healthy.
+
+**Define thresholds proactively**: Don't wait for an incident to decide what "normal" looks like. Establish thresholds based on customer impact, not arbitrary percentages. For example:
+- Availability: 99.9% success rate (0.1% error budget)
+- Latency: P99 under 500ms (acceptable user experience)
+- Throughput: Minimum 100 requests/second per AZ (capacity floor)
+
+### Implementing Embedded Metric Format (EMF)
+
+CloudWatch's Embedded Metric Format enables you to emit metrics alongside structured logs, automatically extracting metrics while preserving full log context for debugging. Here's a comprehensive example of a web service logging request metrics:
+
+```json
+{
+  "_aws": {
+    "Timestamp": 1634319245221,
+    "CloudWatchMetrics": [{
+      "Namespace": "MyApp/Frontend",
+      "Metrics": [
+        { "Name": "RequestCount", "Unit": "Count" },
+        { "Name": "2xx", "Unit": "Count" },
+        { "Name": "4xx", "Unit": "Count" },
+        { "Name": "5xx", "Unit": "Count" },
+        { "Name": "SuccessLatency", "Unit": "Milliseconds" },
+        { "Name": "ErrorLatency", "Unit": "Milliseconds" }
+      ],
+      "Dimensions": [
+        ["Region", "AZ-ID", "Controller", "Action", "InstanceId"],
+        ["Region", "AZ-ID", "Controller", "Action"],
+        ["Region", "Controller", "Action"],
+        ["Region", "AZ-ID"],
+        ["Region"]
+      ]
+    }]
+  },
+  "TraceId": "1-5f9c8e12-3d4f2a1b8c9e5f7a6b3d4e2f",
+  "SourceIP": "203.0.113.42",
+  "UserAgent": "Mozilla/5.0...",
+  "RequestPath": "/api/products/123",
+  "Controller": "Products",
+  "Action": "GetProduct",
+  "Region": "us-east-1",
+  "AZ-ID": "use1-az2",
+  "InstanceId": "i-0abc123def456789",
+  "HttpStatusCode": 200,
+  "RequestCount": 1,
+  "2xx": 1,
+  "4xx": 0,
+  "5xx": 0,
+  "SuccessLatency": 42,
+  "ErrorLatency": 0,
+  "CacheHit": true,
+  "DatabaseQueries": 2,
+  "DatabaseLatency": 15
+}
+```
+
+**Multiple dimension sets**: The example includes five dimension sets, progressing from most granular (instance level) to least granular (region level). This structure supports creating alarms at each level:
+- Instance-level alarms detect individual problematic instances
+- AZ + Controller/Action alarms detect zone-specific endpoint issues
+- Region + Controller/Action alarms detect region-wide endpoint problems
+- AZ-level alarms detect zone-wide issues across all endpoints
+- Region-level alarms detect region-wide systemic issues
+
+**Rich context for debugging**: Beyond metrics, the log includes trace IDs, source IPs, request paths, and performance details. When an alarm triggers, you can query logs filtered by the same dimensions to understand what was happening during the incident.
+
+### Designing Canary Monitoring
+
+Synthetic monitoring through canaries provides client-side perspective on service health. Canaries should:
+
+**Test from within each AZ**: Deploy canaries in each Availability Zone to test zone-local endpoints. A canary running in use1-az1 should test endpoints in use1-az1, not cross-zone endpoints. This ensures networking issues within an AZ don't cause false negatives for other AZs.
+
+**Test representative user journeys**: Don't just ping health check endpoints. Execute actual business transactions: create account → add item to cart → checkout → confirm order. These end-to-end tests catch issues that simple health checks miss.
+
+**Emit metrics with AZ dimensions**: Canary metrics should use the same dimensional structure as server-side metrics, enabling correlation. When both server-side and client-side metrics show degradation in use1-az2, confidence in the diagnosis is high.
+
+**Run continuously at appropriate intervals**: Balance detection speed with cost. Critical paths might warrant per-minute canaries. Less critical workflows might run every 5-10 minutes. Very expensive operations might run hourly but test the complete workflow.
+
+## Detecting Gray Failures with CloudWatch Composite Alarms
+
+CloudWatch composite alarms enable sophisticated detection logic by aggregating multiple metric alarms. A robust gray failure detection system requires a multi-layer alarm hierarchy that can distinguish between zone-specific issues, region-wide problems, and single-instance failures.
+
+### The Detection Strategy
+
+The goal is to trigger alerts when:
+1. Impact exists in a specific Availability Zone (availability OR latency degraded)
+2. Other Availability Zones are healthy (confirming it's not a Regional issue)
+3. Multiple instances are affected (excluding single bad instance scenarios)
+
+This three-part check ensures you evacuate zones only when appropriate and avoid false positives from transient issues or individual instance problems.
+
+### Layer 1: Base Metric Alarms
+
+Create two types of alarms for each metric:
+
+**Three consecutive breaching periods** (sustained impact):
+```json
+{
+  "AlarmName": "Products-List-use1-az1-availability-3inarow",
+  "MetricName": "5xx",
+  "Namespace": "MyApp/Frontend",
+  "Statistic": "Sum",
+  "Dimensions": [
+    { "Name": "Region", "Value": "us-east-1" },
+    { "Name": "AZ-ID", "Value": "use1-az1" },
+    { "Name": "Controller", "Value": "Products" },
+    { "Name": "Action", "Value": "List" }
+  ],
+  "Period": 60,
+  "EvaluationPeriods": 3,
+  "DatapointsToAlarm": 3,
+  "Threshold": 10,
+  "ComparisonOperator": "GreaterThanThreshold"
+}
+```
+
+**Three out of five breaching periods** (fluctuating impact):
+```json
+{
+  "AlarmName": "Products-List-use1-az1-availability-3of5",
+  "MetricName": "5xx",
+  "Namespace": "MyApp/Frontend",
+  "Statistic": "Sum",
+  "Dimensions": [
+    { "Name": "Region", "Value": "us-east-1" },
+    { "Name": "AZ-ID", "Value": "use1-az1" },
+    { "Name": "Controller", "Value": "Products" },
+    { "Name": "Action", "Value": "List" }
+  ],
+  "Period": 60,
+  "EvaluationPeriods": 5,
+  "DatapointsToAlarm": 3,
+  "Threshold": 10,
+  "ComparisonOperator": "GreaterThanThreshold"
+}
+```
+
+The "3 in a row" alarm detects sustained issues lasting at least 3 minutes. The "3 of 5" alarm detects intermittent issues where any 3 minutes in a 5-minute window show problems. Together, they catch both constant and fluctuating failure modes.
+
+### Layer 2: Per-Endpoint AZ Composite Alarms
+
+Aggregate base alarms for each Controller/Action combination in each AZ:
+
+```json
+{
+  "AlarmName": "Products-List-use1-az1-availability",
+  "AlarmRule": "ALARM(Products-List-use1-az1-availability-3inarow) OR ALARM(Products-List-use1-az1-availability-3of5)"
+}
+```
+
+Create similar composite alarms for latency metrics, creating a pair (availability + latency) for each endpoint in each AZ.
+
+### Layer 3: AZ-Level Aggregation
+
+Combine all availability alarms for an AZ into a single composite alarm:
+
+```json
+{
+  "AlarmName": "use1-az1-availability",
+  "AlarmRule": "ALARM(Products-List-use1-az1-availability) OR ALARM(Products-Get-use1-az1-availability) OR ALARM(Checkout-Complete-use1-az1-availability) OR ALARM(Users-Login-use1-az1-availability)"
+}
+```
+
+Similarly for latency:
+
+```json
+{
+  "AlarmName": "use1-az1-latency",
+  "AlarmRule": "ALARM(Products-List-use1-az1-latency) OR ALARM(Products-Get-use1-az1-latency) OR ALARM(Checkout-Complete-use1-az1-latency) OR ALARM(Users-Login-use1-az1-latency)"
+}
+```
+
+### Layer 4: Isolated Impact Detection
+
+Ensure the problem is isolated to one AZ, not region-wide:
+
+```json
+{
+  "AlarmName": "use1-az1-isolated-alarm",
+  "AlarmRule": "(ALARM(use1-az1-availability) OR ALARM(use1-az1-latency)) AND OK(use1-az2-availability) AND OK(use1-az2-latency) AND OK(use1-az3-availability) AND OK(use1-az3-latency)"
+}
+```
+
+This composite alarm triggers only when use1-az1 shows problems AND the other two AZs are healthy. If all three AZs show problems, this alarm won't trigger—correctly identifying a regional issue rather than a zone-specific one.
+
+### Layer 5: Multi-Instance Verification
+
+Use CloudWatch Contributor Insights to ensure the impact affects multiple instances, not just a single problematic instance.
+
+Create a Contributor Insights rule to identify instances contributing to errors:
+
+```json
+{
+  "AggregateOn": "Count",
+  "Contribution": {
+    "Filters": [
+      { "Match": "$.InstanceId", "IsPresent": true },
+      { "Match": "$.HttpStatusCode", "GreaterThan": 499 },
+      { "Match": "$.HttpStatusCode", "LessThan": 600 },
+      { "Match": "$.AZ-ID", "In": ["use1-az1"] }
+    ],
+    "Keys": ["$.InstanceId"]
+  },
+  "LogFormat": "JSON",
+  "LogGroupNames": ["/aws/application/frontend"]
+}
+```
+
+Create an alarm on the UniqueContributors metric:
+
+```json
+{
+  "AlarmName": "not-single-instance-use1-az1",
+  "Metrics": [{
+    "Expression": "INSIGHT_RULE_METRIC(\"5xx-errors-use1-az1\", \"UniqueContributors\")",
+    "Id": "m1"
+  }],
+  "Threshold": 2,
+  "ComparisonOperator": "GreaterThanThreshold"
+}
+```
+
+This alarm triggers when MORE than 2 instances are contributing to errors, indicating the problem is zone-wide, not instance-specific.
+
+### Final Composite Alarm
+
+Combine isolated impact detection with multi-instance verification:
+
+```json
+{
+  "AlarmName": "use1-az1-isolated-impact",
+  "AlarmRule": "ALARM(use1-az1-isolated-alarm) AND ALARM(not-single-instance-use1-az1)",
+  "AlarmActions": ["arn:aws:sns:us-east-1:123456789012:AZ-Evacuation-Required"]
+}
+```
+
+This final alarm triggers only when ALL conditions are met:
+- Impact detected in use1-az1 (availability OR latency)
+- Other AZs are healthy (not a regional issue)
+- Multiple instances affected (not a single bad instance)
+
+At this point, evacuating use1-az1 is the appropriate response.
+
+<Callout type="tip">
+When onboarding new functionality (controllers, actions, microservices), you only need to create base metric alarms and update the Layer 2 composite alarms. Layers 3-5 remain static after initial configuration, making the pattern scale well as your application grows.
+</Callout>
+
+**Try it yourself:** Experiment with the interactive simulation below to see how multi-AZ resilience patterns work in practice.
+
+<MultiAZTopology />
+
+## Availability Zone Evacuation Patterns
+
+Once gray failure is detected in a specific zone, evacuation shifts traffic away from that zone while maintaining service in healthy zones. Two complementary approaches exist: data plane-controlled evacuation (preferred for reliability) and control plane-controlled evacuation (necessary for comprehensive mitigation).
+
+### Data Plane-Controlled Evacuation
+
+The most reliable evacuation methods use data plane operations only, avoiding control plane dependencies that might also be impaired during the incident.
+
+**Route 53 Application Recovery Controller (ARC) Zonal Shift**
+
+Route 53 ARC provides the most robust solution for evacuating Availability Zones. ARC operates five cluster endpoints distributed across AWS Regions, each capable of independently handling routing control updates. These cluster endpoints use data plane operations, not control plane APIs, making them highly available even during significant AWS service events.
+
+Since December 2025, zonal shift and zonal autoshift capabilities have been enhanced to support ALBs with cross-zone load balancing enabled. Previously, zonal shift only worked with Application Load Balancers that had cross-zone load balancing disabled. The mechanism for ALBs with cross-zone enabled works by blocking traffic to targets in the impaired AZ and removing the zonal IP address from DNS, preventing new connections while allowing existing connections to drain gracefully.
+
+Additionally, as of April 2025, AWS FIS can trigger zonal autoshift as a chaos engineering action. This integration enables teams to test AZ failure recovery mechanisms proactively, validating that applications correctly handle automated zone evacuation before encountering real impairments. By injecting controlled zonal autoshift events through FIS experiments, organizations can verify their monitoring detects the shift, runbooks guide response correctly, and applications maintain availability during zone evacuation.
+
+Implementation approach:
+
+1. **Create zonal health check routing controls**: Define one routing control per Availability Zone representing zone health status
+2. **Configure Route 53 health checks**: Create health checks that query routing control state via ARC cluster endpoints
+3. **Associate with DNS records**: Use weighted routing policy with health check evaluation for each AZ-specific load balancer endpoint
+4. **Evacuate via zonal shift**: Update routing control to OFF via ARC API, triggering DNS failover
+
+During evacuation:
+- Set use1-az1 routing control to OFF via ARC data plane API
+- Route 53 health checks immediately see the control as unhealthy
+- DNS responses exclude the use1-az1 load balancer endpoint
+- Existing DNS cache entries expire (TTL typically 60 seconds)
+- New requests route only to use1-az2 and use1-az3
+- Instances in use1-az1 stop receiving traffic within minutes
+
+Critical advantages:
+- Data plane operations (not control plane dependent)
+- Five independent cluster endpoints (Region-level redundancy)
+- Sub-second routing control updates
+- No resource provisioning required
+
+**Critical preparation**: Save your five ARC cluster endpoints locally before incidents occur. During an event, you might not be able to query the ARC control plane to discover these endpoints. Pre-positioning this information in runbooks ensures evacuation capability when needed.
+
+### Control Plane-Controlled Evacuation
+
+When data plane evacuation isn't available or when you need to prevent new capacity from provisioning in the impaired zone, control plane operations are necessary.
+
+**Auto Scaling Group Subnet Removal**
+
+Remove the impaired AZ's subnets from Auto Scaling Groups:
+
+```python
+import boto3
+
+asg_client = boto3.client('autoscaling')
+ec2_client = boto3.client('ec2')
+
+# Get AZ-ID to AZ-name mapping
+azs = ec2_client.describe_availability_zones()
+az_id_to_name = {az['ZoneId']: az['ZoneName'] for az in azs['AvailabilityZones']}
+
+# Identify subnets to remove
+impaired_az_id = 'use1-az1'
+impaired_az_name = az_id_to_name[impaired_az_id]
+
+# For each Auto Scaling Group
+for asg in asg_client.describe_auto_scaling_groups()['AutoScalingGroups']:
+    current_subnets = asg['VPCZoneIdentifier'].split(',')
+
+    # Get subnet AZs
+    subnet_details = ec2_client.describe_subnets(SubnetIds=current_subnets)
+
+    # Remove impaired AZ subnets
+    updated_subnets = [
+        s['SubnetId'] for s in subnet_details['Subnets']
+        if s['AvailabilityZone'] != impaired_az_name
+    ]
+
+    # Update ASG
+    asg_client.update_auto_scaling_group(
+        AutoScalingGroupName=asg['AutoScalingGroupName'],
+        VPCZoneIdentifier=','.join(updated_subnets)
+    )
+
+    # Store original configuration for recovery
+    store_evacuation_record(impaired_az_id, asg['AutoScalingGroupName'], current_subnets)
+```
+
+Auto Scaling responds by:
+- Launching new instances in remaining AZs to maintain desired capacity
+- Terminating instances in the removed AZ according to termination policies
+- Rebalancing capacity across available AZs
+
+**Lambda Function VPC Configuration Update**
+
+Remove impaired AZ subnets from Lambda function configurations:
+
+```python
+lambda_client = boto3.client('lambda')
+
+for function in lambda_client.list_functions()['Functions']:
+    if 'VpcConfig' in function and function['VpcConfig'].get('SubnetIds'):
+        current_subnets = function['VpcConfig']['SubnetIds']
+
+        subnet_details = ec2_client.describe_subnets(SubnetIds=current_subnets)
+
+        updated_subnets = [
+            s['SubnetId'] for s in subnet_details['Subnets']
+            if s['AvailabilityZone'] != impaired_az_name
+        ]
+
+        lambda_client.update_function_configuration(
+            FunctionName=function['FunctionName'],
+            VpcConfig={
+                'SubnetIds': updated_subnets,
+                'SecurityGroupIds': function['VpcConfig']['SecurityGroupIds']
+            }
+        )
+```
+
+### Ensuring Sufficient Remaining Capacity
+
+Before evacuating an AZ, verify sufficient capacity exists in remaining zones. The most resilient approach: pre-provision capacity assuming one AZ is unavailable.
+
+For three-AZ deployment with static stability:
+- Provision 150% of baseline capacity (50% overprovisioning)
+- Distribute evenly: 50% in each AZ
+- Losing one AZ leaves 100% capacity in two AZs
+- No scaling required during evacuation
+
+If you haven't pre-provisioned:
+- Calculate required capacity in remaining AZs
+- Check current capacity and utilization
+- Scale up if needed BEFORE evacuating
+- Wait for new capacity to become healthy
+- Then evacuate the impaired AZ
+
+<Callout type="warning">
+Control plane operations depend on AWS service availability. During widespread impairments, control plane APIs might be slow or unavailable. This is why data plane evacuation is preferred—it's more likely to succeed when you need it most. Use control plane evacuation as a follow-up step after initial traffic shift, not as the primary response mechanism.
+</Callout>
+
+## Summary of Detection and Mitigation Strategies
+
+Gray failures require sophisticated detection and response capabilities that go beyond standard binary failure handling. The complete pattern involves:
+
+**Instrumentation foundation**:
+- Emit metrics with AZ-ID and functional dimensions
+- Use Embedded Metric Format for metric + log correlation
+- Deploy canaries testing zone-local endpoints
+- Define customer-impact-based thresholds
+
+**Multi-layer detection**:
+- Base alarms for sustained and fluctuating impact
+- Per-endpoint AZ composite alarms
+- AZ-level aggregation alarms
+- Isolated impact detection (this AZ bad, others OK)
+- Multi-instance verification via Contributor Insights
+
+**Evacuation execution**:
+- Primary: Route 53 ARC Zonal Shift (data plane)
+- Secondary: Control plane subnet removal (ASGs, Lambda, ECS)
+- Prerequisite: Pre-provisioned capacity for static stability
+- Recovery: Documented process to restore evacuated AZ
+
+The investment in this instrumentation and automation pays dividends for critical workloads where availability targets demand rapid detection and mitigation of subtle failures that traditional monitoring misses.
+
+<KeyTakeaways>
+- **Gray failures hide from standard monitoring**: Differential observability means consumers detect service degradation while the service's own monitoring reports healthy status, requiring consumer-side detection capabilities
+- **Dimension-aligned instrumentation is essential**: Emit metrics using AZ-ID, instance ID, and functional component dimensions; use Embedded Metric Format to combine metrics with rich log context for debugging
+- **Multi-layer composite alarm hierarchy**: Build detection logic that identifies (1) impact in specific AZ, (2) health in other AZs, and (3) multiple affected instances, distinguishing zone failures from regional issues or single bad instances
+- **Contributor Insights prevents false positives**: Use CloudWatch Contributor Insights to count unique instances contributing to errors, ensuring impact affects multiple instances before triggering AZ evacuation
+- **Data plane evacuation has highest reliability**: Route 53 ARC Zonal Shift uses data plane operations across five Regional cluster endpoints, remaining available even during significant AWS service impairments
+- **Control plane evacuation completes mitigation**: Update Auto Scaling Groups, Lambda functions, and ECS services to remove impaired AZ subnets, preventing new capacity from provisioning in the affected zone
+- **Pre-provisioned capacity enables instant failover**: Deploy with 50% overprovisioning (three AZs at 66% each) so losing one zone requires no scaling, eliminating control plane dependencies during evacuation
+- **Outlier detection for noisy environments**: Use chi-squared tests to detect statistically significant error rate skew across zones, identifying single-AZ impact even when all zones show baseline errors
+</KeyTakeaways>

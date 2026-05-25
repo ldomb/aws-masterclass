@@ -1,0 +1,850 @@
+## Introduction
+
+In distributed systems, service dependencies can become a major source of instability. When one service slows down, it doesn't just affect requests to that specific dependency—it can cause a cascading failure that impacts the entire application. This phenomenon occurs because of how **concurrency** works in distributed systems.
+
+**Dependency isolation** is a critical resilience pattern used at Amazon to prevent latency in one dependency from affecting functionality that doesn't require that dependency. By implementing bulkheads and concurrency limits around dependencies, services can continue serving requests that don't need the slow dependency, even when parts of the system are degraded.
+
+To understand why dependency isolation matters, consider a real-world analogy. When David Yanacek worked as a bank teller in high school, he handled customer transactions one at a time. When all tellers were busy, new customers had to wait in line. Queue depth increased under two conditions: first, when there was a surge of customers (typically around lunch or after work), and second, when transactions took longer to process—such as during network outages or when store owners deposited a day's worth of payments at closing time.
+
+The bank handled the first problem (surges) by staffing up for peak traffic and ensuring network reliability. But the second problem (increased latency) required different techniques. Similarly, in distributed systems, load shedding and rate limiting handle traffic surges, but increased latency from dependencies requires dependency isolation strategies.
+
+This lesson explores how Amazon uses dependency isolation techniques like bulkheads, thread pool separation, and circuit breakers to build resilient distributed systems. Understanding dependency isolation is essential for building robust cloud applications. As systems grow and interconnect, the ability to contain failures and maintain partial availability becomes the difference between a resilient service and a cascading outage.
+
+> "At Amazon, we call this technique dependency isolation. We prevent latency in a dependency from affecting the functionality that doesn't require that dependency."
+
+## Understanding Concurrency and Little's Law
+
+The foundation of dependency isolation lies in understanding how concurrency works in distributed systems. **Concurrency** refers to the number of requests that a service is actively working on at any point in time. This is distinct from throughput (requests per second) or request rate. When a request is being actively processed by a server, it consumes resources like CPU for parsing or authentication. But even when the request is idle—waiting for a remote database query to return—it still consumes resources such as memory, sockets, file descriptors, or threads.
+
+Because requests consume resources even while waiting, we must think about a server's capacity limits in terms of concurrency, not just CPU or throughput.
+
+### Little's Law: The Mathematics of Concurrency
+
+Two factors increase a service's concurrency. First, if the incoming request rate increases, concurrency increases proportionally. Second, and more subtly, if the request rate stays constant but processing time increases, concurrency also increases. This relationship is described by **Little's Law**:
+
+**Concurrency = Arrival Rate × Latency**
+
+This simple formula has profound implications for distributed systems. Let's explore this with the bank analogy from the introduction.
+
+<Mermaid title="Little's Law: Traffic Rate vs Latency Effect on Concurrency" chart={`graph LR
+    L["Concurrency = Rate × Latency"] --> S1[Scenario 1: Baseline<br/>1/min × 5 min = 5]
+    L --> S2[Scenario 2: 3× Traffic<br/>3/min × 5 min = 15]
+    L --> S3[Scenario 3: 3× Latency<br/>1/min × 15 min = 15]
+
+    style S2 fill:#ff9,stroke:#f90,color:#1a1a1a
+    style S3 fill:#ff9,stroke:#f90,color:#1a1a1a
+`} />
+
+Scenario 1 shows baseline concurrency: one customer arrives per minute, and each spends 5 minutes in the bank, so on average 5 customers are in the bank at once. Scenario 2 triples the arrival rate while keeping transaction time constant—now 15 customers are in the bank. Scenario 3 keeps arrival rate constant but triples transaction time—again, 15 customers are in the bank.
+
+Both scenarios produce identical concurrency, but they have very different causes and require different solutions. Load shedding and rate limiting handle Scenario 2 (traffic surges), but Scenario 3 (increased latency) requires dependency isolation.
+
+### Why Dependencies Matter
+
+Concurrency is directly affected by latency, and one of the most common sources of latency in Amazon systems comes from calls to remote dependencies. **Dependencies** are remote service calls an application makes to other microservices, databases, caches, disks, or anything it talks to over a network.
+
+Remote dependencies can become slow for many reasons:
+- Packet loss somewhere in the network path
+- Servers in the dependency becoming overloaded
+- Background jobs (like database maintenance) consuming resources
+- Query patterns becoming more expensive over time
+- Cache invalidation causing more cache misses
+
+Locally executing code is typically easier to control with predictable latency by limiting input size and complexity. As a remote dependency slows down, the concurrency on the calling service increases. Because concurrency is a limited resource on a server, a slow dependency can cause the calling service to breach its limits and become unavailable—even for requests that don't need that dependency.
+
+<Callout type="info">
+Think About It: If your database typically responds in 10ms but starts taking 1 second due to a slow query, what happens to your application's concurrency? According to Little's Law, if request rate stays constant, your concurrency increases 100x. Can your thread pools, connection pools, and memory allocation handle that?
+</Callout>
+
+## Running Out of Concurrency: Common Failure Modes
+
+When a server takes on more concurrent work than it can handle, it behaves unpredictably and often becomes unavailable. In cases of extreme overload, a server can become too slow to respond at all, resulting in perceived unavailability from clients that are timing out. Understanding the various ways systems run out of concurrency is crucial for implementing effective isolation strategies.
+
+Amazon uses many techniques to prevent servers from becoming overloaded (as described in other Builders' Library articles on load shedding and fairness). However, those articles mainly focus on overloads driven by increases in request rate. Protecting against overloads from concurrency driven by latency in a dependency requires additional techniques.
+
+Just as a physical bank has limits on standing room in line, concurrency drives up usage of system resources, and it's possible to "run out of room" by reaching application, operating system, and server limits. Here are the most common ways applications run out of resources:
+
+### Memory Exhaustion
+
+Applications hold request state in memory while a request is being processed, even if the request is paused waiting on a dependency. This includes request objects, response buffers, session state, and intermediate computation results.
+
+If a server runs out of memory, the consequences are severe and unpredictable. The operating system might choose random processes to kill in order to meet new allocation demands. That selected process could be the server process itself, causing immediate loss of capacity. Or it could be a support process needed for normal operation—like a metrics collector, log aggregator, or health check responder—resulting in a **gray failure** where the server appears healthy but isn't functioning correctly.
+
+### File Descriptor Exhaustion
+
+When an application opens a file to read from or a socket to talk to a remote dependency, it consumes a **file descriptor**. Operating systems protect themselves from tracking too many file descriptors by limiting each process to a certain threshold (commonly 1024, 4096, or configurable ulimits).
+
+As concurrency increases, more sockets remain open simultaneously waiting for responses. When the file descriptor limit is reached, the application cannot open new connections to dependencies, causing requests to fail immediately with errors like "too many open files."
+
+### Connection Pool Saturation
+
+Applications often communicate with dependencies through **connection pools**—pre-established TCP connections reused across requests. Database connection pools and HTTP client connection pools typically have configured maximum sizes.
+
+If latency to a dependency increases, more connections in the pool become tied up concurrently waiting for responses. When the maximum is reached, new requests have nowhere to go. Depending on the pool implementation, they might fail immediately, block indefinitely, or timeout after waiting for an available connection.
+
+This is particularly problematic because connection pools are often shared across all code paths. A slow dependency used by one API can consume all connections, preventing even unrelated APIs from functioning.
+
+### Thread Pool Depletion
+
+Applications use pools of threads to process work. If code running in a thread makes a blocking call to a dependency, that thread is unusable for making progress on other work until the remote call returns or times out.
+
+Thread pools are typically configured with an upper bound on the number of threads (both for resource efficiency and to prevent excessive context switching). As dependency latency increases, threads spend more time blocked waiting for responses, and the pool fills up. New requests find no available threads and must wait or be rejected.
+
+Non-blocking programming models (like async/await, reactive streams, or event-driven architectures) help avoid this specific bottleneck by making I/O operations run asynchronously, freeing up threads for other work. However, even these applications can run out of concurrency—the bottleneck simply shifts from threads to the other kinds of constrained resources listed here (memory, file descriptors, connection pools).
+
+### Queue Depth Growth
+
+Applications use queues to buffer incoming work and to exchange work between internal components. If the time to process each item in the queue increases (due to slow dependencies), the depth of that queue increases according to Little's Law.
+
+Unbounded queues can grow until they consume all available memory, crashing the application. But even bounded queues cause serious problems:
+
+If a queue is consumed in a **first-in-first-out (FIFO)** order, items that entered the queue when it was deep may have been waiting so long that by the time a worker pulls them off the queue, client timeouts have already expired. The application will work on these requests anyway and waste resources on work that no one is waiting for anymore.
+
+This is sometimes called the "queue convoy problem" or "head-of-line blocking." It's particularly pernicious because the application appears busy and productive, but it's actually doing useless work on requests that have already timed out.
+
+<Callout type="warning">
+Timeouts alone are insufficient to prevent concurrency overload. If typical latency is 10ms and timeouts are set to 1 second, a dependency slowdown can cause a 100x increase in concurrency before timeouts trigger. Concurrency bulkheads provide more effective protection than timeout tuning.
+</Callout>
+
+| Resource Type | Limit Location | Failure Mode | Blast Radius |
+|--------------|----------------|--------------|--------------|
+| Memory | OS/Hardware | Process killed or OOM errors | Entire server or unpredictable processes |
+| File Descriptors | OS ulimit | Cannot open new connections | All new requests requiring connections |
+| Connection Pools | Application config | Connection acquisition timeout | All code using that pool |
+| Thread Pools | Application config | No threads available for work | All work routed to that pool |
+| Queues | Application config or memory | Queue full or memory exhaustion | All work entering that queue |
+
+## Implementing an Overall Concurrency Limit
+
+With the variety of failure modes and the difficulty in predicting their effects on a system, it's important to use **bulkheads** to limit the amount of overall concurrency in the system to prevent overload.
+
+Implementing an overall concurrency limit is relatively straightforward. When a service receives a request, it can count "up" on a variable. When it completes the request, it can count "down" on that variable. If the value exceeds some configured limit, the server simply rejects new work until the measured concurrency dips below the limit.
+
+Here's conceptual pseudocode:
+
+```python
+class ConcurrencyLimiter:
+    def __init__(self, max_concurrency):
+        self.max_concurrency = max_concurrency
+        self.current_concurrency = 0
+        self.lock = Lock()
+
+    def try_acquire(self):
+        with self.lock:
+            if self.current_concurrency >= self.max_concurrency:
+                return False  # Reject request
+            self.current_concurrency += 1
+            return True
+
+    def release(self):
+        with self.lock:
+            self.current_concurrency -= 1
+
+# Usage
+limiter = ConcurrencyLimiter(max_concurrency=100)
+
+def handle_request(request):
+    if not limiter.try_acquire():
+        return error_response("503 Service Unavailable - Too many concurrent requests")
+
+    try:
+        return process_request(request)
+    finally:
+        limiter.release()
+```
+
+Although a concurrency limiter will prevent overload driven by an increase in latency, it can still be improved to help a service degrade more gracefully. Services often expose multiple APIs, and a particular dependency might only be needed for a subset of those APIs.
+
+**The key insight**: If a dependency becomes slow, we want to ensure that only the functionality of the service that depends on that API is affected by the concurrency limiter. The other functionality that doesn't need the dependency should keep working normally.
+
+## Using Bulkheads to Control the Blast Radius
+
+One simple approach for isolating dependencies from each other is to limit the dependencies' concurrency separately by creating a different bulkhead for each dependency. The term **bulkhead** comes from ship design, where bulkheads are compartments that prevent water from flooding the entire vessel if one section is breached.
+
+To understand how this works, let's return to the bank teller analogy from the introduction.
+
+### Real-World Bulkheads: Express Lines at the Bank
+
+As a bank teller, David Yanacek handled two types of transactions: cash or check. Check deposits or withdrawals were quick because they only involved validation and data entry. But cash deposits took much longer—they required careful counting of cash and coins, and sometimes required asking a supervisor to go to the vault to retrieve or store larger amounts (a "cash miss").
+
+When the bank was busy and the line backed up, people with transactions they thought would be quick—like depositing a check—were the most upset. They didn't want to wait behind someone depositing bags of coins from their small business.
+
+Sometimes a customer with a large cash transaction would considerately let others behind them go first. Other times the group of tellers would organize into two sets: an **"express" line** for quick, check-only transactions, and an **"everything" line** for handling any type of slower transaction.
+
+This kept average queue time down and reduced the total number of customers in the bank at any time. Even with this separation, in extreme cases all cash transactions started taking a long time (when the supervisor was going to and from the vault repeatedly). So to keep this "overload" from filling the entire bank, the bank could simply limit the length of the line for slower cash transactions, ensuring there was always room for check deposits.
+
+<Mermaid title="Bulkhead Pattern: Separate Lines for Different Transaction Types" chart={`graph LR
+    Entrance[Bank Entrance] --> CheckLine[Express Line<br/>Max: 5]
+    Entrance --> CashLine[Cash Line<br/>Max: 10]
+
+    CheckLine --> Tellers1[Tellers 1-2<br/>Check only]
+    CashLine --> Tellers2[Tellers 3-4<br/>Any transaction]
+
+    Tellers2 -.->|Sometimes slow| Vault[Vault Service]
+
+    style CheckLine fill:#9f9,stroke:#0f0,color:#1a1a1a
+    style CashLine fill:#ff9,stroke:#f90,color:#1a1a1a
+    style Vault fill:#f99,stroke:#f00,color:#1a1a1a
+`} />
+
+### Mapping to Software Architecture
+
+This real-world technique maps beautifully to the virtual world. In a threaded server where different sets of APIs have different dependencies, this could be as simple as using a different thread pool for each group of APIs.
+
+For example, let's say the bank were a service called **BankService**. The service has two APIs:
+- **TransactCheck**: Depends on the Ledger service, does simple bookkeeping
+- **TransactCash**: Depends on both the Ledger and the VaultService
+
+To protect the dependencies from each other, we implement the service using two thread pools, each with its own maximum size. Even if the VaultService gets slow, only the TransactCash thread pool fills up, and the service keeps serving TransactCheck calls without any degradation.
+
+<Mermaid title="Separate Thread Pools Isolating Check and Cash API Paths" chart={`graph LR
+    Client[Client Requests] --> Router[API Router]
+    Router -->|TransactCheck| CheckPool[Check Pool<br/>12/25 busy]
+    Router -->|TransactCash| CashPool[Cash Pool<br/>25/25 busy]
+    CheckPool --> Ledger[Ledger<br/>10ms]
+    CashPool --> Ledger
+    CashPool --> Vault[Vault<br/>5000ms]
+
+    style Vault fill:#f99,stroke:#f00,color:#1a1a1a
+    style CheckPool fill:#9f9,stroke:#0f0,color:#1a1a1a
+    style CashPool fill:#ff9,stroke:#f90,color:#1a1a1a
+`} />
+
+To end users of this service, the result is positive. Instead of the whole BankService being affected when VaultService is slow, customers can still conduct check transactions normally. The blast radius is contained.
+
+### Non-Blocking Implementations
+
+This approach works in a non-blocking server implementation as well. But instead of having a separate thread pool for each API, we maintain a numeric variable to count the concurrency of each API. If a request comes in and the server is already working on the maximum number of configured concurrency for that API, the request is rejected.
+
+```python
+class PerAPILimiter:
+    def __init__(self):
+        self.limiters = {
+            'TransactCheck': ConcurrencyLimiter(max_concurrency=35),
+            'TransactCash': ConcurrencyLimiter(max_concurrency=35),
+        }
+
+    def try_acquire(self, api_name):
+        return self.limiters[api_name].try_acquire()
+
+    def release(self, api_name):
+        self.limiters[api_name].release()
+
+# Usage
+api_limiter = PerAPILimiter()
+
+async def handle_request(api_name, request):
+    if not api_limiter.try_acquire(api_name):
+        return error_response(f"429 Too Many Requests for {api_name}")
+
+    try:
+        return await process_request(api_name, request)
+    finally:
+        api_limiter.release(api_name)
+```
+
+### Runtime Reconfiguration
+
+Although we describe both approaches in terms of hard-coded limits, Amazon finds it's important to be able to reconfigure this kind of load shedding configuration at runtime instead of being configurable only at system startup.
+
+Why? Because during an incident, you may need to quickly adjust limits to handle unexpected load patterns. Or you may discover through monitoring that your initial limit values don't match actual usage patterns.
+
+To implement this in a threaded server, rather than attempting to reconfigure thread pool sizes (which is complex and risky), Amazon often implements the threaded server with a single thread pool and uses the same simple variable-based concurrency checking technique as the non-blocking approach. The limits can then be read from a configuration service and updated dynamically without restarting the application.
+
+<Callout type="tip">
+Think About It: Imagine your service has three APIs with different dependencies. How would you decide the concurrency limit for each? Would you divide equally, allocate based on expected traffic, or use a dynamic approach?
+</Callout>
+
+## Hard, Soft, and Dynamic Concurrency Allocation
+
+Once you've decided to isolate dependencies with bulkheads, you face a critical question: how do you allocate available concurrency across APIs? Amazon uses several approaches, each with distinct tradeoffs.
+
+### Hard Allocation: Simple but Inefficient
+
+The simplest option is to **hard-allocate** the available concurrency to each API. Going back to the BankService example, let's say we perform a load test against the service and find that it can handle 50 concurrent requests, regardless of the mix of the two APIs. Because we can't predict which API will be called more than the other, we set the concurrency limit of each to 25.
+
+```python
+class HardAllocationLimiter:
+    def __init__(self):
+        self.limiters = {
+            'TransactCheck': ConcurrencyLimiter(max_concurrency=25),
+            'TransactCash': ConcurrencyLimiter(max_concurrency=25),
+        }
+        # Total capacity: 50, but split evenly
+```
+
+**Advantage**: Strong isolation. If TransactCash's dependency becomes slow and fills up its 25 concurrent slots, TransactCheck can still use its full 25 slots.
+
+**Disadvantage**: Underutilization. If clients end up calling TransactCheck far more often than TransactCash, the service starts returning errors for TransactCheck even though server utilization is low. Perhaps TransactCash is only using 5 concurrent requests while TransactCheck is trying to use 40. We're rejecting 15 TransactCheck requests despite having 20 unused slots.
+
+Clients can change their access patterns unpredictably, making it impossible to pick a "perfect" hard allocation up-front. This can lead to either frequent errors or excessive over-provisioning.
+
+### Soft Allocation: Better Utilization, Weaker Isolation
+
+Another option is to **soft-allocate** the available concurrency to each API. Instead of hard allocating 25 concurrent requests to each API, we allocate 35 concurrent requests to each API and limit the service to handle 50 concurrent requests as a whole.
+
+```python
+class SoftAllocationLimiter:
+    def __init__(self):
+        self.overall_limiter = ConcurrencyLimiter(max_concurrency=50)
+        self.api_limiters = {
+            'TransactCheck': ConcurrencyLimiter(max_concurrency=35),
+            'TransactCash': ConcurrencyLimiter(max_concurrency=35),
+        }
+
+    def try_acquire(self, api_name):
+        # Check overall limit first
+        if not self.overall_limiter.try_acquire():
+            return False
+        # Then check per-API limit
+        if not self.api_limiters[api_name].try_acquire():
+            self.overall_limiter.release()
+            return False
+        return True
+
+    def release(self, api_name):
+        self.api_limiters[api_name].release()
+        self.overall_limiter.release()
+```
+
+**Advantage**: If the traffic distribution is different than expected, there's room for one API to dip into the other API's concurrency. This improves overall utilization.
+
+**Disadvantage**: If one API's dependency becomes slow, that API can now hog 35 threads, leaving only 15 for the other API. If the other API is still being called at a high enough rate, the service could end up running out of capacity for both APIs, defeating the isolation we were trying to achieve.
+
+### Hybrid Approaches: Balancing the Tradeoffs
+
+A more complicated approach is to attempt to balance the "hard" and "soft" approaches by permitting one API to dip into shared capacity for a short duration, but over time limiting it to a smaller value.
+
+For example, an API might be allowed to burst up to 35 concurrent requests for short periods, but if it sustains high concurrency for more than 1 minute, its limit is ratcheted back to 25.
+
+This approach absorbs bursts of traffic and protects against long-duration slow dependencies. However, it has the same problem with sustained traffic as the hard-allocation approach if that extra concurrency was actually being helpful before it was ratcheted back.
+
+This approach is complex, and it's difficult to prove its efficacy in every workload the service will see in production. Testing all the timing edge cases and transition states becomes challenging.
+
+### Priority-Based Allocation: Droppable vs. Non-Droppable Work
+
+A comparable way to frame these approaches is to categorize work as **"droppable"** or **"non-droppable"**. Ideally a service doesn't drop any requests, but at a moment when a service is out of capacity, it must make a decision.
+
+At some high threshold—say 90% of the service's maximum concurrency—the service begins rejecting "droppable" work and only accepts work that is "non-droppable."
+
+This prioritization can be extended to involve more categories, each with its own droppable threshold:
+
+| Concurrency Level | Accepted Work Types |
+|------------------|---------------------|
+| 0-70% | All work (critical, normal, background) |
+| 70-85% | Critical and normal only (drop background) |
+| 85-95% | Critical only (drop normal and background) |
+| 95-100% | Emergency mode (even critical may be sampled) |
+
+This approach requires careful classification of work and thorough testing to ensure the priority thresholds are set correctly.
+
+### Amazon's Principle: Simplicity First
+
+There are plenty of variations on these themes of resource allocation, sharing, and borrowing. As the approach becomes more complicated, it also becomes more difficult to test, instrument, and monitor to ensure that it works when needed and that it doesn't have unforeseen downsides.
+
+> "Because more complex approaches tend to be harder to test and reason about, we strive to use the simplest approach possible, and we add more complexity only after we prove we need it through testing or operational experience."
+
+<Callout type="tip">
+Amazon's principle is to use the simplest approach that works. Start with hard allocation. If monitoring shows you're rejecting too many requests despite available capacity, consider soft allocation or dynamic approaches. But only add complexity after proving through testing or operational experience that you need it.
+</Callout>
+
+<Mermaid title="Choosing Between Hard, Soft, and Dynamic Concurrency Allocation" chart={`graph TD
+    Start([Start]) --> Hard[Hard Allocation]
+    Hard --> Monitor{Rejecting with<br/>spare capacity?}
+    Monitor -->|No| Success([Keep Hard])
+    Monitor -->|Yes| Soft[Soft Allocation]
+    Soft --> TestSoft{Still rejects<br/>on dep failure?}
+    TestSoft -->|Yes| Success2([Keep Soft])
+    TestSoft -->|No| Dynamic[Dynamic / Priority]
+
+    style Start fill:#9f9,stroke:#0f0,color:#1a1a1a
+    style Success fill:#9f9,stroke:#0f0,color:#1a1a1a
+    style Success2 fill:#9f9,stroke:#0f0,color:#1a1a1a
+    style Dynamic fill:#ff9,stroke:#f90,color:#1a1a1a
+`} />
+
+## Timeouts Are Not Enough
+
+Timeouts are one tool Amazon uses for limiting the impact of a slow dependency. When a service makes remote calls to a dependency, client libraries are configured to use a maximum amount of time to wait for the service to return. If that timer elapses, the service might even retry in case it succeeds the next time around.
+
+However, **retries complicate the concurrency picture**. A retry ties up that concurrency for even longer on the calling service. If this happens frequently enough, it could cause the service to run out of concurrency. To avoid retries becoming a problem, Amazon uses algorithms to automatically turn off retries when the dependency is consistently failing (see the Builders' Library article "Timeouts, retries, and backoff with jitter").
+
+Although it's important to set retries to reasonable thresholds, tuning timeouts and retry policies is unlikely to prevent services from running out of concurrency. Here's why:
+
+If the typical latency for a remote call is 10 milliseconds, and the timeout is set to 100 milliseconds or 1 second, then a latency increase in a dependency could still be a 10x or 100x increase in concurrency, which could easily overload the service.
+
+**Example Calculation:**
+
+Assumptions:
+- Normal dependency latency: 10ms
+- Request rate: 1000 requests/second
+- Normal concurrency: 1000 × 0.01 = 10 concurrent requests
+
+If dependency slows to 1000ms (1 second) before timeout:
+- New concurrency: 1000 × 1.0 = 1000 concurrent requests
+- That's a 100x increase!
+
+Even if you set an aggressive 100ms timeout:
+- Timeout concurrency: 1000 × 0.1 = 100 concurrent requests
+- Still a 10x increase
+
+<Callout type="warning">
+Timeouts are important for limiting how long you wait for lost causes, but they're not effective as a concurrency protection mechanism. By the time timeouts trigger, your concurrency may have already increased 10x or 100x.
+</Callout>
+
+### Configuring Timeouts Based on Client Expectations
+
+Instead of focusing on timeouts as a concurrency protection mechanism, Amazon configures timeouts based on other considerations. For example, we align the timeout configuration of a dependency we call with the timeout that our own caller is using.
+
+Why? To avoid wasting work when our caller stops waiting for a response. If our client gives up after 3 seconds, there's no point in us continuing to wait 10 seconds for a dependency—we should fail faster and clean up resources.
+
+To contain the concurrency-related blast radius from a pathologically slow dependency, Amazon focuses on getting the right concurrency bulkheads in place around each client, rather than relying on timeout tuning.
+
+## It's Not Always the Dependency's Fault: Modal Behavior
+
+So far, we've described dependency isolation in terms of dependencies slowing down. However, at Amazon we've seen that a service can slow down and sometimes hit concurrency limits even when its dependencies are fast. The problem is **modal behavior** in how the service interacts with dependencies.
+
+### Example 1: Retries with Backoff
+
+A dependency might start returning errors. Maybe these are server-side errors (500s), or maybe the dependency is throttling the service's requests because it's being called too often (429s). In either case, client libraries or SDKs will often automatically retry.
+
+After all, retries can paper over transient errors and improve your service's overall availability. But the problem with retries is that they increase the application's latency for that code path. This problem is greatly amplified by **backoff between retries**, in which the client intentionally sleeps between attempts.
+
+So although the actual latency of the dependency might be fine (say, 50ms for each attempt), the application slows down dramatically because of the way it interacts with that dependency:
+
+```
+First attempt: 50ms → error
+Sleep: 100ms (exponential backoff)
+Second attempt: 50ms → error
+Sleep: 200ms (exponential backoff)
+Third attempt: 50ms → success
+
+Total latency: 50 + 100 + 50 + 200 + 50 = 450ms
+```
+
+The dependency's latency is still 50ms, but the business logic now takes 450ms! According to Little's Law, this 9x increase in latency causes a 9x increase in concurrency.
+
+### Example 2: Variable Query Complexity
+
+Let's say our BankService has a new API called **ListTransactions** that returns up to 100 transactions to its client. When it queries its transactions database, it returns paginated results, 10 at a time.
+
+Typical queries are for "today's transactions," and they return only 4 transactions on average. This means the service typically makes only **one call** to the database every time a client calls ListTransactions.
+
+But if clients start performing queries over longer time ranges that would return 100 transactions, the service would need to make **10 back-to-back calls** to the database (10 pages × 10 transactions each).
+
+The actual remote call latency to the database dependency stays the same (perhaps 10ms per query), but the business logic that interacted with the dependency takes 10x longer (100ms total).
+
+<Callout type="info">
+Think About It: How many other "variable work" patterns can you identify in typical applications? Consider batch operations, nested queries, fan-out requests, or pagination loops.
+</Callout>
+
+### The Danger of Modal Behavior
+
+In both cases, the business logic exhibits dangerous **modal behavior**: In one situation, the code behaves one way, but in a different situation, the code becomes more expensive. These modes make operating a service difficult and should be avoided as much as possible.
+
+The good news is that the concurrency-limiting strategies described earlier still work, since we isolate the concurrency of each API altogether. The point is that **you need to guard against the concurrency of your code that uses the dependency, not just the concurrency spent making remote calls**.
+
+One technique Amazon uses for designing resilient systems is to perform **constant work** on every request, as described in the Builders' Library article "Reliability, constant work, and a good cup of coffee." By designing APIs to do predictable amounts of work regardless of input, you eliminate modal behavior and make capacity planning straightforward.
+
+## Dependency Isolation and Caching
+
+When David Yanacek worked at the bank, not every transaction involving cash required him to ask his supervisor to go to the vault. Instead, each teller had their own cash drawer for keeping small amounts of cash for accepting small deposits and taking out small withdrawals.
+
+If the cash drawer had a balance that was too high, the teller would ask the supervisor to store the excess in the vault. If a customer wanted a large withdrawal, the teller would ask the supervisor to get more money out of the vault.
+
+This model loosely maps to a service architecture that uses a **database (the vault)** and a **cache (the cash drawer)**. When Amazon uses this "database with a cache" architecture, we're careful to assess the risks of modal behavior, as described in the Builders' Library article "Caching challenges and strategies."
+
+<Mermaid title="Cache Miss Isolation: Limiting Concurrent VaultService Calls" chart={`graph LR
+    Client[Client] --> Service[BankService]
+    Service --> Cache{Cache?}
+    Cache -->|Hit · 1ms| Return[Return]
+    Cache -->|Miss · 100ms| Vault[VaultService]
+    Vault --> Update[Update Cache] --> Return
+
+    style Return fill:#9f9,stroke:#0f0,color:#1a1a1a
+    style Vault fill:#ff9,stroke:#f90,color:#1a1a1a
+`} />
+
+### Two Modes of Operation
+
+In terms of our BankService, we can update the architecture to incorporate the cash drawer (cache). Before BankService calls the VaultService, it checks its local cache to see if it had enough money there, and if so, skips the call to the vault.
+
+Now the single TransactCash API has **three dependencies**:
+1. Its cache (local, fast)
+2. The VaultService (remote, sometimes slow)
+3. The LedgerService (remote, usually fast)
+
+A service that uses a cache operates under two modes:
+- **Cache hits** are faster and cheaper to serve
+- **Cache misses** are slower and more expensive
+
+If the VaultService becomes slow or unavailable, the BankService can still answer client requests if it has everything it needs in the cache. However, if we forget to isolate the service's concurrency for performing VaultService calls from the concurrency it uses for serving cache hits, **it could run out of overall concurrency and fail both types of requests**.
+
+### The Solution: Isolate Cache Misses
+
+Instead, we **limit the concurrency of calls to VaultService**, therefore leaving capacity available for serving requests out of the cache and retaining some availability even when a different dependency is having problems.
+
+```python
+class CachingServiceLimiter:
+    def __init__(self):
+        # Limit concurrent vault calls (cache misses)
+        self.vault_limiter = ConcurrencyLimiter(max_concurrency=20)
+        # Overall service can handle more (cache hits are cheap)
+        self.overall_limiter = ConcurrencyLimiter(max_concurrency=100)
+
+    def handle_request(self, request):
+        if not self.overall_limiter.try_acquire():
+            return error_response("503 Service Unavailable")
+
+        try:
+            # Check cache first
+            result = check_cache(request)
+            if result is not None:
+                return result  # Cache hit - no vault needed
+
+            # Cache miss - need to call vault
+            if not self.vault_limiter.try_acquire():
+                return error_response("429 Vault Service Overloaded")
+
+            try:
+                result = call_vault_service(request)
+                update_cache(request, result)
+                return result
+            finally:
+                self.vault_limiter.release()
+        finally:
+            self.overall_limiter.release()
+```
+
+With this approach:
+- If VaultService is slow, only 20 concurrent cache misses are allowed
+- The remaining 80 concurrency slots can serve cache hits
+- The service maintains partial availability even during VaultService degradation
+
+## Circuit Breakers and Partitioning
+
+The types of dependency isolation discussed in this article are forms of **circuit breakers**. (Some open-source libraries like Resiliency4j refer to this specific kind of concurrency isolator as a **bulkhead**.)
+
+Circuit breakers are logic that prevents one workload, mode of operating, or dependency from affecting an entire application. They trigger when things aren't "working well" to fast-fail new requests instead of accepting them, in hopes that by shedding load, the system recovers.
+
+The circuit breaker techniques described so far have been designed to isolate each remote dependency separately so that functionality unrelated to the slow dependency continues to work. However, some dependencies are composed of infrastructure or constructs that are designed to fail independently, such as a **partitioned database**, or a dependency with modes of its own (like serving results from its own cache instead of its database).
+
+### The Challenge of Partitioned Data Stores
+
+Amazon services are built to be horizontally scalable. To deal with state in a scalable way, they often use a horizontally scalable, partitioned data store, such as Amazon DynamoDB. These data stores have **partitions that operate independently**, with independent limits.
+
+If requests exceed the limits of a single partition (say by driving more than 3,000 reads/second to it—the limit at the time of writing), requests will begin to be rejected to that partition, but requests to other partitions will be unaffected. So with 10 partitions, a single partition overload lowers the availability to 90%, instead of to 0% if there had been only one partition.
+
+<Mermaid title="Partitioned DynamoDB: One Overloaded Partition Affects 25%" chart={`graph LR
+    App[Application] --> P1[Partition 1<br/>Healthy]
+    App --> P2[Partition 2<br/>OVERLOADED]
+    App --> P3[Partition 3<br/>Healthy]
+    App --> P4[Partition 4<br/>Healthy]
+
+    style P1 fill:#9f9,stroke:#0f0,color:#1a1a1a
+    style P2 fill:#f99,stroke:#f00,color:#1a1a1a
+    style P3 fill:#9f9,stroke:#0f0,color:#1a1a1a
+    style P4 fill:#9f9,stroke:#0f0,color:#1a1a1a
+`} />
+
+### The False Positive Problem
+
+If our application were to wrap calls to DynamoDB in a single circuit breaker, then if the circuit breaker sees many throttling errors talking to a single partition, the circuit breaker might erroneously conclude that the entire table was having an issue. This would lead the circuit breaker to proactively fail future calls that would have been served by other partitions just fine.
+
+This is a **false positive**—we're failing requests that would have succeeded.
+
+### Trade-offs with Opaque Partitioning
+
+There are tough trade-offs when implementing circuit breakers for a partitioned data store. With a partitioned data store, we often don't know which partition a request will be routed to. Therefore, the client has to treat the entire partitioned service as a single dependency, and set the circuit-breaker logic at that level, rather than at a fine-grained partition level.
+
+However, partitioned data stores like DynamoDB expose some higher-level grouping concepts, like **table**, with independent limits and sets of partitions. Circuit breakers can be applied at a table level rather than at a service level, to achieve some more fine-grained specificity.
+
+### Transparent Partitioning
+
+When Amazon builds systems that interact with a partitioned dependency where the partitions are transparent—like a distributed Memcached or Redis cluster—we can implement a circuit breaker that is **partition-aware** and avoid this whole problem.
+
+Otherwise, we implement heuristics to detect certain cases where requests are repeatedly going to the same partition. For example, we can feed the partition key into a **heavy hitters algorithm** to notice when we're accessing the same partition at a high rate. It won't catch all cases, but it can be a helpful "hot key" detection heuristic.
+
+### Accepting Imperfection
+
+When we use a bulkhead to guard calls to an opaquely partitioned dependency, we have a false positive problem. The bulkhead will cause requests to fast-fail that would otherwise have succeeded because the requests would have landed on a healthy partition.
+
+However, even an imprecise circuit breaker can still be valuable. If we had left out the bulkhead completely, an overloaded partition would cause the whole service to run out of concurrency, and **requests that didn't even need to talk to that dependency would have failed as well**.
+
+But this discussion shows the importance of making circuit breakers as closely aligned to the infrastructure they're guarding against as possible, to avoid amplifying the blast radius of a small outage within a dependency and turning it into a perceived outage across the whole dependency.
+
+<Callout type="tip">
+When implementing circuit breakers for partitioned dependencies, track metrics per table or logical grouping, not just per service. This helps you distinguish between "one hot partition" issues versus "whole service down" issues.
+</Callout>
+
+**Try it yourself:** Experiment with the interactive simulation below to see how circuit breakers and dependency isolation work in practice.
+
+<CircuitBreakerDemo />
+
+## How Micro of a Microservice?
+
+There's another way to deal with dependency isolation that's more structural: **split the service into separate services**. This approach is common at Amazon because a service-oriented architecture is deeply embedded in our DNA.
+
+However, it can still be difficult to decide how many smaller services to split a larger service into. It requires weighing factors like:
+- Operational overhead (more services = more to monitor and deploy)
+- Scaling complexity (each service needs its own scaling logic)
+- Deployment coordination (versioning and compatibility across services)
+- Overall system complexity (more services = more network hops and failure modes)
+
+Amazon finds that **dependency isolation is a useful lens to look through** when making these decisions. If a service has multiple modes of operating—like serving different APIs with different sets of dependencies—then we can make our overall systems more reliable by operating them independently as separate services.
+
+### Per-Function Isolation in AWS Lambda
+
+Taking this a step further, when Amazon implements services using AWS Lambda, we can configure each API to execute as a different Lambda function. A feature in AWS Lambda, called **per-function-concurrency**, lets developers reserve a maximum amount of concurrency for each Lambda function.
+
+That way, because functions have different dependencies and different failure modes or traffic spikes, they're isolated from affecting one another. In essence, Amazon has taken its experience with dependency isolation and baked it into AWS Lambda to make it easier for developers to implement.
+
+### Simplifying with Proxies
+
+Fortunately, breaking a service into multiple services for dependency isolation has gotten easier over time. And it can be done without complicating things for the clients of the service.
+
+Amazon proxy services like **Application Load Balancer** and **Amazon API Gateway** enable a service owner to present a single endpoint to its callers, but route different workloads to different services behind the scenes.
+
+For example:
+```
+Client → API Gateway → /check → CheckService (small fleet)
+                    → /cash → CashService (larger fleet with vault dependency)
+```
+
+The client sees one endpoint, but the backend achieves perfect dependency isolation through service separation.
+
+## Dependency Isolation in AWS Lambda
+
+AWS Lambda provides a real-world example of dependency isolation. AWS Lambda is a serverless service that executes your code without the need to provision or manage servers. To understand how Lambda achieves dependency isolation, let's first follow a request through the Lambda architecture.
+
+### Lambda Architecture Overview
+
+When you call Lambda, you're talking to the **Lambda frontend invoke service**. The frontend invoke service performs authentication and request validation, and it orchestrates the execution of your function in the Lambda backend.
+
+AWS Lambda runs your code in **execution environments** on instances called **workers**, which it creates on the fly as needed. Spinning up execution environments is fast, but not instantaneous, so Lambda does its best to re-use each execution environment for a while before tearing them down after they've been idle for a period of time.
+
+The **worker manager** is in charge of keeping track of which execution environments already exist for each function. When you invoke your function on Lambda, the frontend invoke service asks the worker manager to look up the location of a suitable execution environment.
+
+However, there might not always be an idle execution environment for your function already running on a worker. In this case, the worker manager asks the **placement service** to figure out the ideal worker on which to run your new execution environment.
+
+<Mermaid title="Lambda Invocation: Warm Path vs Cold Start via Placement Service" chart={`sequenceDiagram
+    participant Client
+    participant Frontend as Frontend Invoke Service
+    participant WM as Worker Manager
+    participant PS as Placement Service
+    participant Worker
+
+    Client->>Frontend: InvokeFunction(MyFunction)
+    Frontend->>WM: Find execution environment
+    alt Warm invoke (environment exists)
+        WM-->>Frontend: Environment at Worker-42
+        Frontend->>Worker: Execute on existing environment
+    else Cold start (need new environment)
+        WM->>PS: Need new environment for MyFunction
+        PS->>Worker: Create execution environment
+        Worker-->>PS: Environment created
+        PS-->>WM: Environment at Worker-73
+        WM-->>Frontend: Environment at Worker-73
+        Frontend->>Worker: Execute on new environment
+    end
+    Worker-->>Client: Function result
+`} />
+
+### Two Modes of Operation
+
+The example of dependency isolation in Lambda is within the worker manager service. The worker manager operates in two distinct modes:
+
+1. **Warm invoke path**: It responds right away when it already has an execution environment for your function
+2. **Cold start path**: It takes slightly longer when it needs to ask the placement service for a new execution environment
+
+Worker manager doesn't know in advance whether it's going to call the placement service for any given request, so it has one thread pool for handling all of its requests.
+
+### Isolating the Placement Service Dependency
+
+Because worker manager operates in two modes, it **protects one mode from affecting the other**. For example, it limits the number of threads that can be concurrently waiting for placement service to respond.
+
+That way, if placement service were to become slow, worker manager still has plenty of threads to handle the warm invoke path and route invoke requests to the execution environments that are already running.
+
+Of course, Amazon puts a great deal of engineering effort into continuously improving the performance and resiliency of placement service. But we still find it's important for clients of services, like worker manager, to isolate their different workloads to limit the blast radius of their dependencies.
+
+**Key principle**: Only functionality in a service requiring a critical dependency should be affected by an issue with that critical dependency.
+
+## Concurrency Isolation in Amazon EC2
+
+Concurrency isolation is also something that the Amazon Elastic Compute Cloud (Amazon EC2) service teams think about extensively. AWS Regions are composed of multiple isolated Availability Zones that are designed to be independent.
+
+Each Availability Zone is separated by a meaningful physical distance from other zones to avoid correlated failure scenarios due to environmental hazards like fires, floods, and tornadoes. Each Availability Zone has independent physical infrastructure:
+- Dedicated connections to utility power
+- Standalone backup power sources
+- Independent mechanical services
+- Independent network connectivity within and beyond the Availability Zone
+
+### Zonal Isolation in the Control Plane
+
+When your instance interacts with the Amazon EC2 control plane (the part that launches instances or returns details about your running instances), it talks to an endpoint for the Region that your instance lives in, even though your instance lives in a particular Availability Zone within that Region.
+
+This is so you can describe your instances in a Region by providing their instance ID, without having to remember which Availability Zone you launched it into.
+
+After the Amazon EC2 regional control plane performs the minimal logic to validate, authenticate, authorize, and figure out the relevant Availability Zone for your request, it forwards your request to a **separate service that handles requests only for instances that live in that Availability Zone**.
+
+This way, most of what happens behind the scenes in the Amazon EC2 control plane logic and dependencies is **zonal**, sharing fate with the Availability Zone infrastructure it runs in.
+
+### Benefits of Zonal Isolation
+
+This means that if Amazon EC2 has trouble launching instances in one Availability Zone, you might not be able to launch or describe instances in that Availability Zone, but you can launch or describe instances in the healthy Availability Zones.
+
+However, there is still one Region-wide endpoint for Amazon EC2. Amazon EC2 has gone to great lengths to make this Region-wide endpoint operate smoothly in the face of impact to a particular Availability Zone.
+
+Ultimately this comes down to having **strict resource isolation**, including concurrency and thread pool isolation in its frontend Regional endpoint, using separate resources to talk to other zonal services in each Availability Zone.
+
+<Mermaid title="EC2 Regional Control Plane with Isolated AZ Thread Pools" chart={`graph LR
+    Client[EC2 API Client] --> Regional[Regional<br/>Control Plane]
+    Regional -->|isolated pool| AZ1[AZ-1a CP]
+    Regional -->|isolated pool| AZ2[AZ-1b CP]
+    Regional -->|isolated pool| AZ3[AZ-1c CP]
+    AZ1 --> I1[AZ-1a Instances]
+    AZ2 --> I2[AZ-1b Instances<br/>DEGRADED]
+    AZ3 --> I3[AZ-1c Instances]
+
+    style AZ2 fill:#ff9,stroke:#f90,color:#1a1a1a
+    style I2 fill:#f99,stroke:#f00,color:#1a1a1a
+    style AZ1 fill:#9f9,stroke:#0f0,color:#1a1a1a
+    style AZ3 fill:#9f9,stroke:#0f0,color:#1a1a1a
+`} />
+
+More about how Amazon built the Amazon EC2 control plane around Availability Zones is described in the Builders' Library articles "Static stability using Availability Zones" and "Minimizing correlated failures in distributed systems."
+
+## Circuit Breakers and Operational Visibility
+
+When Amazon uses circuit breaking techniques like this, we focus heavily on the operational visibility we need to ensure that the circuit breaker is working correctly. This allows us to see how close to various limits the service is over time, to alarm when limits are too close, and to distinguish failures caused by the circuit breaker tripping versus a timeout or failure talking to the dependency.
+
+### Instrumentation Strategy
+
+To accomplish this, Amazon includes instrumentation throughout the code to measure the concurrency for each circuit breaker at the start of each request. That way we can plot statistics like the median and maximum concurrency over time.
+
+This is also useful when introducing the circuit breaker in the first place. By deploying it in **"instrumentation only" mode**, we can ensure we have the right configuration that won't cause an unintended background failure rate. After we have the configuration right, we can flip it into **"enforcement mode."**
+
+```python
+class InstrumentedConcurrencyLimiter:
+    def __init__(self, max_concurrency, metrics_client, name):
+        self.max_concurrency = max_concurrency
+        self.current_concurrency = 0
+        self.metrics = metrics_client
+        self.name = name
+        self.enforcement_enabled = False  # Start in instrumentation-only mode
+
+    def try_acquire(self):
+        with self.lock:
+            # Always emit current concurrency metric
+            self.metrics.emit(f"{self.name}.current_concurrency",
+                            self.current_concurrency)
+
+            if self.current_concurrency >= self.max_concurrency:
+                # Log what would have happened
+                self.metrics.emit(f"{self.name}.would_reject", 1)
+
+                # Only actually reject if enforcement is enabled
+                if self.enforcement_enabled:
+                    self.metrics.emit(f"{self.name}.rejected", 1)
+                    return False
+
+            self.current_concurrency += 1
+            self.metrics.emit(f"{self.name}.accepted", 1)
+            return True
+```
+
+### Key Metrics to Track
+
+When implementing dependency isolation, Amazon tracks:
+
+| Metric | Purpose | Alarm Threshold |
+|--------|---------|----------------|
+| Current concurrency | See real-time load | >80% of limit |
+| Maximum concurrency (P99) | Understand peak usage | >90% of limit |
+| Rejection rate | Track circuit breaker activations | >1% of requests |
+| Rejection reason | Distinguish circuit breaker from actual failures | Categorize by type |
+| Latency by dependency | Detect slowdowns early | >2x baseline |
+
+For an in-depth description of how Amazon instruments applications, check out the Builders' Library article "Instrumenting distributed systems for operational visibility."
+
+## Testing Dependency Isolation
+
+Amazon's philosophy on testing circuit breakers is clear and uncompromising:
+
+> "If we don't regularly test our dependency-isolation circuit breakers, then we should assume they don't work."
+
+These measures are easy to get wrong and hard to prove without thorough testing. Here's Amazon's approach:
+
+### Game Days and Fault Injection
+
+Amazon regularly conducts **game days** where teams deliberately inject failures into dependencies to verify isolation mechanisms work correctly. This includes:
+
+1. **Latency injection**: Slow down a dependency and verify only affected APIs show errors
+2. **Complete failure**: Take down a dependency and verify partial availability is maintained
+3. **Partial failure**: Affect one partition/AZ and verify blast radius is contained
+4. **Concurrency saturation**: Drive high load to one API and verify others are unaffected
+
+**AWS Fault Injection Simulator** provides automated tools for these tests, allowing teams to:
+- Inject controlled faults into AWS resources
+- Simulate real-world failure scenarios
+- Measure impact on availability and latency
+- Verify circuit breakers trip as expected
+
+### Continuous Verification
+
+Beyond periodic game days, Amazon implements continuous testing:
+- **Canary requests** constantly probe each dependency
+- **Shadow traffic** replays production patterns against test environments
+- **Chaos engineering** randomly injects small faults in production
+- **Synthetic monitoring** validates expected failure modes
+
+<Callout type="warning">
+Circuit breakers that aren't tested regularly don't work when you need them. Make fault injection testing a regular part of your development and operations process, not a one-time event.
+</Callout>
+
+## Conclusion: Containing the Blast Radius
+
+In a service-oriented architecture like Amazon's, each service is likely to have multiple dependencies. If one of a service's dependencies becomes slow, that service also becomes slow, driving up the amount of concurrent work in the service. Because that service has limits on how much concurrency it can handle (threads, memory, sockets), a slow dependency can have an impact on the entire service—affecting even the APIs in the service that don't share that dependency.
+
+At Amazon, our service-oriented architecture is many layers deep. A service might make a synchronous call to another service, which makes a synchronous call to another service, and so forth. In this model, a significant latency increase in a downstream service is increasingly difficult for an upstream service to deal with the further it is away from the source of the slowdown.
+
+### Latency Is Harder to Handle Than Failures
+
+It's harder to deal with a slowdown than it is to deal with other modes like fast failures. With fast failures, upstream applications can use techniques like **stale caching** to mask problems in dependencies. Latency complicates this by making error handling more difficult, and it consumes resources in client applications too.
+
+This is why Amazon prefers to implement services that **fail fast**, rather than trying to queue up work and introduce modal behavior of high latency.
+
+### Techniques for Containment
+
+Fortunately, Amazon has found ways to contain the impact of a slow dependency to only the APIs that depend on it. We do this by:
+
+1. **Separating thread pools** or using simple counting variables to reject excess work for each API or dependency
+2. **Splitting APIs into separate services** when we're concerned enough about the impact of one API on another
+3. **Implementing caching** with isolated concurrency for cache misses
+4. **Using partitioning strategies** that align circuit breakers with infrastructure boundaries
+5. **Designing for constant work** to eliminate modal behavior where possible
+
+### Balancing Complexity and Reliability
+
+More generally, services might have multiple "modes": different APIs with different dependencies, different code paths depending on input, different request or response sizes, and different caches. Modal behavior in systems is hard to reason about, and it should be minimized to make systems easier to test and operate.
+
+However, we also find that we need to balance this with other practical implementation and operational considerations, so systems often have some variety of modes. When our systems have these modes, we isolate the resources that we use to interact with each dependency so that a slowdown in one doesn't starve the application from some concurrency-related resource.
+
+### The Core Principle
+
+As stated at the outset of this article: **We try to prevent a slow single dependency from affecting the functionality that doesn't require that dependency.**
+
+And finally, we find that if we don't regularly test our dependency-isolation circuit breakers, then we should assume they don't work. These measures are easy to get wrong and hard to prove without thorough testing, using tools like the AWS Fault Injection Simulator.
+
+**Test!**
+
+<KeyTakeaways>
+- **Concurrency is the hidden resource**: Unlike CPU or memory, concurrency (active + waiting requests) is limited by multiple factors: threads, sockets, file descriptors, connection pools, and queues. Dependency latency directly drives concurrency according to Little's Law (Concurrency = Rate × Latency).
+- **Bulkheads contain blast radius**: Limiting concurrency per dependency or API ensures that slowness in one dependency only affects functionality that requires it. This is like ship bulkheads that prevent flooding from spreading to the entire vessel.
+- **Simplicity over complexity**: Hard allocation of concurrency is often sufficient and easier to reason about. Only add soft allocation or dynamic approaches after proving through testing that you need the improved utilization. More complex schemes are harder to test and debug.
+- **Timeouts don't prevent concurrency overload**: If typical latency is 10ms and timeout is 1s, a dependency slowdown causes 100x concurrency increase before timeouts trigger. Bulkheads provide effective protection where timeouts fail.
+- **Cache isolation is critical**: Limit concurrency for dependency calls (cache misses) separately from cached operations (cache hits) to maintain partial availability during dependency degradation. Without isolation, cache misses can starve cache hits.
+- **Modal behavior amplifies problems**: Code that performs variable work (retries with backoff, pagination loops, fan-out queries) creates unpredictable concurrency spikes even when dependencies are fast. Design for constant work where possible.
+- **Partitioned dependencies need careful handling**: Circuit breakers for partitioned systems (like DynamoDB) face a trade-off between false positives (failing requests that would succeed on healthy partitions) versus no protection. Align circuit breakers with logical groupings (tables, not entire services) when possible.
+- **Test or assume failure**: Circuit breakers that aren't regularly tested through fault injection don't work when needed. Use AWS Fault Injection Simulator and game days to verify isolation mechanisms behave correctly under realistic failure scenarios.
+</KeyTakeaways>

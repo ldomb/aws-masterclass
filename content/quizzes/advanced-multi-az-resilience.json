@@ -1,0 +1,60 @@
+{
+  "lessonSlug": "advanced-multi-az-resilience",
+  "questions": [
+    {
+      "question": "Your application monitors aggregate error rates across all Availability Zones. During an incident, AZ1 error rate is 8%, AZ2 is 2%, and AZ3 is 2%. Your alert threshold is 5% aggregate errors. Why might customers in AZ1 experience significant degradation while your monitoring shows healthy status?",
+      "options": [
+        "Error rates below 10% are normal and don't indicate real problems",
+        "This is a gray failure: the aggregate (4%) is below threshold, but AZ1's differential 8% rate indicates localized impact",
+        "Load balancers automatically mask errors below 10% so customers aren't affected",
+        "The monitoring system is incorrectly calculating aggregate statistics"
+      ],
+      "correctIndex": 1,
+      "explanation": "This is a classic gray failure scenario. The aggregate error rate (4%) doesn't cross your 5% threshold, so no alerts fire. However, AZ1 is experiencing 8% errors—significantly above the 2% baseline in other zones. Customers served by AZ1 resources see degraded service, but your monitoring indicates everything is healthy. This is why zone-specific dimensions and differential analysis are critical."
+    },
+    {
+      "question": "You're designing CloudWatch alarms to detect gray failures. Your application has 20 instances per AZ across 3 AZs. A single EC2 instance develops a disk issue causing errors. What mechanism prevents this from triggering AZ evacuation?",
+      "options": [
+        "Setting error rate thresholds high enough that one instance can't trigger them",
+        "Using CloudWatch Contributor Insights to count unique instance IDs contributing to errors; only alarm when count exceeds a threshold (e.g., 5% of fleet)",
+        "Configuring health checks to automatically remove bad instances before alarms trigger",
+        "Using longer alarm evaluation periods to smooth out single-instance noise"
+      ],
+      "correctIndex": 1,
+      "explanation": "CloudWatch Contributor Insights identifies the number of unique instances contributing to errors. By alarming only when unique contributors exceed a threshold (e.g., 2 instances, or 5% of the AZ's fleet), you distinguish between single-instance problems (remove the instance) and zone-wide problems (evacuate the zone). Options A and D might help but don't specifically identify the scope of impact."
+    },
+    {
+      "question": "Your RDS database primary is in AZ1. A gray failure affects networking between AZ1 and AZ2, causing connection failures from AZ2 instances. Your zone-specific alarms show errors in AZ2, not AZ1. What pattern helps detect this scenario?",
+      "options": [
+        "Deploy RDS Multi-AZ and let automated failover handle all scenarios",
+        "Create alarms that detect impact in multiple AZs simultaneously, indicating a shared resource (like the database) as the root cause",
+        "Always evacuate the zone showing errors in metrics, regardless of other signals",
+        "Gray failures affecting shared resources cannot be detected and must be handled manually"
+      ],
+      "correctIndex": 1,
+      "explanation": "When a single resource (like an RDS primary in AZ1) is accessed from multiple zones, a zone-specific failure can cause symptoms in other zones. The pattern is to create composite alarms that detect impact in multiple AZs that don't match the isolated-AZ pattern. This indicates a shared dependency problem. The appropriate response is often to fail over the shared resource (RDS to another AZ) rather than evacuating zones showing symptoms."
+    },
+    {
+      "question": "Why does Route 53 Application Recovery Controller (ARC) provide zonal shift capabilities through data plane APIs rather than control plane APIs?",
+      "options": [
+        "Data plane APIs have lower latency for faster evacuations",
+        "Control planes may be impaired during the same events requiring evacuation; data plane operations are more reliable",
+        "Data plane APIs are cheaper to operate at scale",
+        "AWS restricts control plane access during incidents for security"
+      ],
+      "correctIndex": 1,
+      "explanation": "The key principle is that control planes are more complex and statistically more likely to fail, especially during significant events. If an Availability Zone impairment affects AWS infrastructure, control planes might also be impaired. Route 53 ARC's data plane operates through five Regional cluster endpoints with independent infrastructure, remaining available even during major service events. This makes evacuation reliable when you need it most."
+    },
+    {
+      "question": "You observe elevated error rates in all three Availability Zones simultaneously. Your composite alarms are configured to detect isolated AZ impact. What should your monitoring system conclude?",
+      "options": [
+        "Evacuate all three zones sequentially, starting with the highest error rate",
+        "This is likely a Regional issue or workload-wide problem, not an isolated AZ failure; AZ evacuation won't help",
+        "Evacuate zones with error rates above threshold until errors resolve",
+        "Restart all instances across all zones to clear the issue"
+      ],
+      "correctIndex": 1,
+      "explanation": "The isolated-AZ detection pattern specifically checks that impact exists in one zone while others are healthy. If all zones show elevated errors simultaneously, this indicates a Regional problem (AWS service issue, upstream dependency, or a bug in your application code) rather than zone-specific infrastructure failure. Evacuating zones won't help because the problem isn't isolated to zone infrastructure. This scenario requires different response procedures focused on the actual root cause."
+    }
+  ]
+}

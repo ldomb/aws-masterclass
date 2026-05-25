@@ -1,0 +1,60 @@
+{
+  "lessonSlug": "dependency-isolation",
+  "questions": [
+    {
+      "question": "Your service has a maximum capacity of 100 concurrent requests. It normally receives 50 requests/second with 200ms latency. A database dependency suddenly increases latency to 2 seconds. According to Little's Law, what happens to concurrency?",
+      "options": [
+        "Concurrency increases from 10 to 100, exactly matching capacity",
+        "Concurrency increases from 10 to 50, well within capacity limits",
+        "Concurrency stays at 10 because request rate hasn't changed",
+        "Concurrency increases from 50 to 100, exceeding safe limits"
+      ],
+      "correctIndex": 0,
+      "explanation": "Little's Law states concurrency = arrival rate × latency. Initially: 50 req/s × 0.2s = 10 concurrent requests. After latency increase: 50 req/s × 2s = 100 concurrent requests. This 10x increase in latency causes a 10x increase in concurrency, pushing the service to its capacity limit even though request rate hasn't changed."
+    },
+    {
+      "question": "A BankService has two APIs: DepositCheck (uses only Ledger) and WithdrawCash (uses Ledger and VaultService). The service can handle 80 concurrent requests total. VaultService becomes very slow. What is the BEST bulkhead strategy?",
+      "options": [
+        "Set a single service-wide concurrency limit of 80 for all requests",
+        "Set separate limits: 40 for DepositCheck, 40 for WithdrawCash",
+        "Set soft limits: 50 for each API, 80 total, allowing borrowing",
+        "Set timeout of 100ms for VaultService calls to fail fast"
+      ],
+      "correctIndex": 1,
+      "explanation": "Separate hard limits (option B) provide the best isolation. When VaultService slows down, WithdrawCash requests will consume all 40 of their allocated slots, but DepositCheck continues working normally with its full 40-slot allocation. Option A would let WithdrawCash consume all 80 slots, blocking DepositCheck. Option C weakens isolation. Option D (timeouts) doesn't prevent concurrency exhaustion—even with 100ms timeout, many requests can pile up."
+    },
+    {
+      "question": "Your service uses a cache with a VaultService backend. Cache hits take 5ms, cache misses take 500ms (including VaultService call). VaultService becomes slow (5 seconds per call). You have 100 threads. What happens WITHOUT dependency isolation?",
+      "options": [
+        "Only cache misses slow down; cache hits continue at 5ms",
+        "All 100 threads eventually get tied up waiting for VaultService, blocking even cache hits",
+        "The service automatically fails over to cache-only mode",
+        "Timeouts prevent thread exhaustion by failing requests after 500ms"
+      ],
+      "correctIndex": 1,
+      "explanation": "Without dependency isolation, cache misses waiting on the slow VaultService (5s each) will gradually consume all 100 threads. Even cache hit requests will be unable to get a thread to execute on, causing total service unavailability. This is why Amazon limits concurrency for dependency calls separately from cache operations—preserving capacity for fast cache hits even when the backend dependency is slow."
+    },
+    {
+      "question": "Your DynamoDB table has 10 independent partitions. One partition becomes overloaded and throttles requests. You have a circuit breaker around all DynamoDB calls. What is the risk?",
+      "options": [
+        "No risk—circuit breakers always improve availability",
+        "The circuit breaker may trip and start failing requests to healthy partitions, amplifying the blast radius from 10% to 100%",
+        "DynamoDB will automatically reroute requests from the bad partition to healthy ones",
+        "Circuit breakers don't work with partitioned data stores"
+      ],
+      "correctIndex": 1,
+      "explanation": "A circuit breaker that doesn't understand partitioning can amplify a blast radius. If one partition (10% of capacity) is throttling, the circuit breaker sees many failures and may trip, now failing requests that would have succeeded on the 9 healthy partitions. This turns a 10% issue into a 100% outage. Amazon accepts this trade-off because without any bulkhead, one overloaded partition would cause the entire service to run out of concurrency, affecting even functionality that doesn't use DynamoDB at all."
+    },
+    {
+      "question": "You deploy a new circuit breaker to production that limits concurrency for API calls to an external payment service. What is the BEST operational practice?",
+      "options": [
+        "Enable enforcement mode immediately to get maximum protection",
+        "Deploy in instrumentation-only mode first, verify metrics show correct behavior, then enable enforcement",
+        "Set limits very high initially (10x expected load) to avoid false positives",
+        "Test in production during low-traffic hours when failures won't impact customers"
+      ],
+      "correctIndex": 1,
+      "explanation": "Amazon's best practice is to deploy circuit breakers in instrumentation-only mode first. This measures concurrency and logs what would have been rejected without actually rejecting requests. Teams can verify the configuration is correct and won't cause unintended background failure rates. Only after confirming correct behavior should enforcement mode be enabled. This staged rollout prevents circuit breakers from becoming a new source of outages."
+    }
+  ]
+}

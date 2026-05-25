@@ -1,0 +1,910 @@
+## Introduction
+
+When a new developer at Amazon needed to troubleshoot why a web server wasn't starting on their developer desktop, a coworker suggested looking at the logs—specifically, to "cat the log file." Coming from a college background limited to compilation, source control, and text editors, the suggestion seemed bizarre, possibly a prank involving actual cats. It wasn't.
+
+The "cat" command, along with grep, sed, and awk, opened up an entirely new way of understanding systems. These Unix tools revealed that the Amazon.com web server application was already **instrumented** to emit all kinds of useful information into its logs. This instrumentation showed what configuration was missing, where it might be crashing, and how it was interacting with downstream services.
+
+> "The website is made up of a lot of moving pieces, and it was essentially a black box to me at the beginning. However, after diving headfirst into the system, I learned how to figure out how the server worked and how to interact with its dependencies just by looking at the output of the instrumentation."
+
+This revelation—that systems can be made transparent through instrumentation—represents a fundamental principle of operational culture at Amazon. **Instrumentation**—the explicit code that records how long tasks take, how often code paths execute, metadata about what tasks were working on, and what parts succeeded or failed—is the foundation for everything from understanding customer experience to detecting operational events to continuously improving system performance.
+
+Without instrumentation, distributed systems remain black boxes. With comprehensive instrumentation, they become transparent, understandable, and improvable. This lesson explores why instrumentation matters, what to measure, how to instrument code effectively, and the best practices Amazon has refined over years of operating distributed systems at massive scale—from services handling thousands of requests per second to DynamoDB processing over 20 million requests per second.
+
+## Why Instrumentation Matters
+
+Instrumentation serves multiple critical purposes at Amazon beyond simply learning how systems work. It's the lens through which teams understand, operate, and continuously improve their services.
+
+### Seeing the Customer Experience
+
+At Amazon, operational performance directly impacts customer experience. For services associated with amazon.com, increased latency results in poor shopping experiences and measurably lower conversion rates. Research shows that even small latency increases—measured in milliseconds—reduce the likelihood that customers complete purchases. For AWS customers, they depend on the high availability and low latency of AWS services for their own businesses.
+
+Amazon doesn't just consider average latency. The focus is even more closely on **latency outliers**, particularly the 99.9th and 99.99th percentiles. This isn't just perfectionism—it's based on two fundamental insights:
+
+**First, outliers matter individually.** If one request out of 1,000 is slow, that represents one customer having a poor experience. At Amazon's scale, even rare events happen frequently in absolute terms. A 0.1% failure rate sounds small until you realize it means 1,000 failures per million requests.
+
+**Second, reducing high percentile latency often reduces median latency as a side effect.** When teams identify and fix causes of tail latency—issues like garbage collection pauses, retry storms, or resource exhaustion—those fixes typically improve the entire latency distribution. By contrast, optimizing only median latency (like caching the most common requests) rarely improves high percentile latency.
+
+<Mermaid title="Optimizing P99.9 vs Median: Different Improvement Strategies" chart={`graph TD
+    A[Focus on P99.9] --> B[Fix GC Pauses]
+    A --> C[Fix Retry Storms]
+    A --> D[Fix Resource Exhaustion]
+    B --> E[Median Improves]
+    C --> E
+    D --> E
+    B --> F[P99.9 Improves]
+    C --> F
+    D --> F
+
+    G[Focus on Median] --> H[Cache Popular Items]
+    H --> I[Median Improves]
+    H --> J[P99.9: Maybe Improves]
+
+    style A fill:#d4edda,color:#1a1a1a
+    style E fill:#d4edda,color:#1a1a1a
+    style F fill:#d4edda,color:#1a1a1a
+    style J fill:#fff3cd,color:#1a1a1a
+`} />
+
+### The Multiplier Effect in Service-Oriented Architecture
+
+The other reason Amazon focuses on high percentile latency is that **high latency in one service has a multiplier effect across other services**. Amazon is built on a service-oriented architecture. Many services collaborate with each other to accomplish tasks, such as rendering a web page on amazon.com. As a result, an increase in latency of a service deep in the call chain—even if the increase is only in a high percentile—has a big ripple effect on the latency experienced by the end user.
+
+Consider a web page that requires calling 50 different services to render completely. If each service has a 99.9th percentile latency spike, the probability that at least one of those 50 calls experiences the spike becomes significant. The page render is only as fast as the slowest service in the chain.
+
+This makes tail latency in leaf services (services at the end of call chains) particularly impactful. A 99.9th percentile latency increase from 100ms to 500ms in a leaf service can cascade into multi-second delays for end users when multiple services are involved.
+
+<Callout type="warning">
+In distributed systems with deep call chains, tail latency at any layer can dominate end-user experience. This is why Amazon instruments every service comprehensively—you can't improve what you can't measure, and you need to measure everywhere to understand where problems originate.
+</Callout>
+
+### Service Ownership and Operational Culture
+
+Large systems at Amazon are made up of many cooperating services. Each service is developed and operated by a single team—the **service owner**. Every member of that team thinks like an owner and operator of the service, whether they're a software developer, network engineer, manager, or any other role.
+
+As owners, teams:
+- Set goals on operational performance of all associated services
+- Ensure visibility into service operations to meet those goals
+- Deal with any issues that arise
+- Hold themselves to even higher goals the following year
+
+**To set goals and get that visibility, teams must instrument systems.** There's no outsourcing of operations—the team that builds the service operates it. This creates a powerful feedback loop: developers directly experience the operational consequences of their design decisions, creating strong incentives to build operationally excellent systems.
+
+### Tactical Event Response
+
+Instrumentation enables teams to detect and respond to operational events tactically. Instrumentation feeds data into:
+
+**Operational dashboards** that operators view to monitor real-time metrics, spotting anomalies too subtle to trigger alarms but indicative of developing issues.
+
+**Alarms** that trigger and engage operators when the system behaves unexpectedly—error rates spike, latency increases, or capacity approaches limits.
+
+**Detailed logs** that operators use to quickly diagnose why things went wrong. From detailed output, teams can mitigate the problem immediately and come back later to prevent recurrence.
+
+Without good instrumentation throughout code, teams sink precious time into diagnosing problems. With comprehensive instrumentation, diagnosis that might take hours or days can happen in minutes. The difference between "we have no idea why this failed" and "the logs show the database connection pool was exhausted" is the difference between extended customer impact and quick mitigation.
+
+## What to Measure: Multi-Perspective Monitoring
+
+To operate services according to high standards on availability and latency, service owners need to measure how systems behave from multiple perspectives to get complete end-to-end understanding.
+
+### The Complexity of Simple Architectures
+
+Even in simple architectures, comprehensive monitoring is complex. Consider a service that customers call through a load balancer, which talks to a remote cache and remote database.
+
+<Mermaid title="Service Dependency Chain Requiring Multi-Perspective Metrics" chart={`graph LR
+    Client[Clients] --> LB[Load Balancer]
+    LB --> Service[Service]
+    Service --> Cache[Remote Cache]
+    Service --> DB[Remote Database]
+
+    style Client fill:#e1f5ff,color:#1a1a1a
+    style Service fill:#d4edda,color:#1a1a1a
+    style Cache fill:#fff3cd,color:#1a1a1a
+    style DB fill:#fff3cd,color:#1a1a1a
+`} />
+
+To understand this system's behavior, teams need metrics from multiple perspectives:
+
+**Service perspective:**
+- How long do operations take from the service's point of view?
+- How often does the service experience errors?
+- What's the service's view of cache and database latency?
+
+**Load balancer perspective:**
+- What latency do clients actually experience?
+- Are connection counts increasing?
+- Is the service rejecting connections?
+
+**Cache perspective:**
+- What does the cache see as latency?
+- What's the cache hit rate?
+- Is the cache experiencing errors?
+
+**Database perspective:**
+- What query latency does the database measure?
+- Are queries slow due to missing indexes or lock contention?
+- Is the database approaching capacity?
+
+When metrics from all these perspectives come together, service owners can quickly track down problem sources and dig into root causes. If client-perceived latency increases but service-measured latency doesn't, the problem is likely network or load balancer related. If service-measured database latency increases but database-measured query latency doesn't, the problem might be connection pool exhaustion or network issues.
+
+### AWS Service Metrics Are Not Enough
+
+While AWS services like DynamoDB automatically provide CloudWatch metrics on success rates, error rates, and latency as measured by the service, teams building systems using these services need much more visibility.
+
+**Instrumentation requires explicit code** in your service that records:
+- How long tasks take (from your service's perspective)
+- How often certain code paths are exercised
+- Metadata about what each task was working on
+- Which parts of tasks succeeded or failed
+- Context about failures (what was attempted, what was the state)
+
+If a team doesn't add explicit instrumentation, it's forced to operate its own service as a black box. When problems occur, the team can see that DynamoDB is working fine (AWS metrics show it), but has no visibility into what their service is doing with DynamoDB or why requests are failing.
+
+### Instrumentation Depth: A Real Example
+
+Consider a service API operation that retrieves product information by ID, checking local cache, then remote cache, then database:
+
+```java
+public GetProductInfoResponse getProductInfo(GetProductInfoRequest request) {
+    // check our local cache
+    ProductInfo info = localCache.get(request.getProductId());
+
+    // check the remote cache if we didn't find it in the local cache
+    if (info == null) {
+        info = remoteCache.get(request.getProductId());
+        localCache.put(info);
+    }
+
+    // finally check the database if we didn't have it in either cache
+    if (info == null) {
+        info = db.query(request.getProductId());
+        localCache.put(info);
+        remoteCache.put(info);
+    }
+
+    return info;
+}
+```
+
+This looks simple—about 15 lines of straightforward code. But to operate this service effectively in production, teams need to answer dozens of questions about production behavior:
+
+**Request context:**
+- Which product are we looking up?
+- Who called the API? What was their identity?
+- What product category is this in? (for breakdown by category)
+
+**Local cache behavior:**
+- Did we find the item in the local cache?
+- What's the local cache hit rate overall and by category?
+- How full is the local cache?
+- How often are items being evicted?
+
+**Remote cache behavior:**
+- Was the item in the remote cache?
+- How long did it take to read from the remote cache?
+- How long did deserialization of the cache object take?
+- Did the remote cache call succeed or fail?
+- If it failed, what was the error?
+
+**Database behavior:**
+- How long did the database query take?
+- Did the query succeed?
+- If it failed, why—timeout, invalid query, lost connection, throttling?
+- If it timed out, was our connection pool full?
+- Did we fail to connect to the database?
+- Or was the database just slow to respond?
+- What was the query plan? (for slow query analysis)
+
+**Cache population:**
+- How long did populating caches take?
+- Were caches full, causing evictions?
+- If so, what items were evicted? (for analyzing eviction patterns)
+
+**Response characteristics:**
+- How big was this product info object?
+- Does size correlate with latency? (large objects might be slow)
+
+> "The code for answering all of those questions (and more) is quite a bit longer than the actual business logic. Some libraries can help reduce the amount of instrumentation code, but the developer still must ask the questions about the visibility that the libraries will need, and then the developer must be intentional about wiring in the instrumentation."
+
+The fully instrumented version of this code might be 200+ lines—the instrumentation code dwarfs the business logic. But without this instrumentation, diagnosing production issues becomes nearly impossible.
+
+### Request Tracing Across Services
+
+When troubleshooting a request that flows through a distributed system, it's difficult to understand what happened if you only look at that request based on one interaction. To piece together the puzzle, Amazon pulls together in one place all measurements about all systems involved.
+
+This requires each service to:
+1. **Record a trace ID for each task** it processes
+2. **Propagate that trace ID to every service** that collaborates on that task
+
+For example, when a web request comes in:
+- The web server assigns it trace ID "abc-123"
+- Web server calls inventory service, passing "abc-123"
+- Web server calls pricing service, passing "abc-123"
+- Pricing service calls database, logging operations with "abc-123"
+- Inventory service calls warehouse system, passing "abc-123"
+
+Later, when analyzing what happened to request "abc-123", teams can pull logs from all services filtered by that trace ID, reconstructing the complete request flow, seeing where time was spent and where failures occurred.
+
+Collecting instrumentation across systems for a given trace ID can be done either:
+- **After the fact as needed**: Query logs from each service for the trace ID
+- **In near real-time**: Using distributed tracing solutions like AWS X-Ray (instrumented with OpenTelemetry/AWS Distro for OpenTelemetry) to automatically collect and visualize traces
+
+<Mermaid title="Distributed Trace Propagation Across Services" chart={`sequenceDiagram
+    participant Client
+    participant WebServer
+    participant Inventory
+    participant Pricing
+    participant Database
+
+    Client->>WebServer: Request (trace: abc-123)
+    WebServer->>Inventory: Check stock (trace: abc-123)
+    Inventory->>Database: Query (trace: abc-123)
+    Database-->>Inventory: Result (trace: abc-123)
+    Inventory-->>WebServer: In stock (trace: abc-123)
+    WebServer->>Pricing: Get price (trace: abc-123)
+    Pricing->>Database: Query (trace: abc-123)
+    Database-->>Pricing: Result (trace: abc-123)
+    Pricing-->>WebServer: $29.99 (trace: abc-123)
+    WebServer-->>Client: Response (trace: abc-123)
+
+    Note over Client,Database: All logs tagged with trace ID abc-123 for correlation
+`} />
+
+## How Amazon Instruments Services
+
+Instrumentation requires coding—it's not something that happens automatically. When implementing new functionality, teams take time to add extra code to indicate what happened, whether it succeeded or failed, and how long it took.
+
+Because instrumentation is such a common coding task, practices emerged at Amazon over the years to address common patterns.
+
+### Standardization for Common Patterns
+
+Two key standardization approaches enable effective instrumentation at scale:
+
+**Standardized instrumentation libraries** help library authors give consumers of their libraries visibility into how libraries are operating. For example, commonly used HTTP clients integrate with standard instrumentation libraries. When a service team implements a remote call to another service using these clients, they automatically get instrumentation about those calls—latency, error rates, retry counts, etc.
+
+This means that common operations don't require custom instrumentation code. The library handles emitting metrics, and the service owner gets visibility for free. This dramatically reduces the burden of instrumentation while ensuring consistency across services.
+
+**Structured log-based metric reporting** provides the foundation for Amazon's approach to metrics. When an instrumented application runs and performs work, resulting telemetry data is written to a **structured log file**. Generally, it's emitted as one log entry per "unit of work"—whether that's a request to an HTTP service or a message pulled from a queue.
+
+### Log First, Aggregate Later: The Amazon Approach
+
+At Amazon, a fundamental principle differentiates the instrumentation approach from many other systems:
+
+<Callout type="info">
+**Measurements in applications aren't aggregated and occasionally flushed to a metrics aggregation system.** Instead, all timers and counters for every piece of work are written in log files. Logs are processed and aggregate metrics are computed afterward by some other system.
+</Callout>
+
+This "log first, aggregate later" approach provides several advantages:
+
+**Complete detail for troubleshooting**: Every request's complete instrumentation data is preserved. When investigating a specific failed request, teams have all the detailed timing and counter information for that exact request.
+
+**Flexible aggregation**: Aggregate metrics can be computed in any way needed—by time window, by customer, by product category, by geographic region—without needing to plan aggregation strategies in advance.
+
+**Request-level trace data**: For troubleshooting individual requests, teams can pull up the exact log entry for that request, seeing all the details about what happened.
+
+**Single instrumentation approach**: The same instrumentation code serves both high-level aggregate operational metrics and detailed troubleshooting data at the request level.
+
+At Amazon, teams **log first, and produce aggregate metrics later.**
+
+### Two Types of Log Data
+
+Amazon services most commonly instrument to emit two types of log data:
+
+**1. Request data (structured logs)**: Typically represented as a single structured log entry for each unit of work. Contains:
+- Properties about the request and who made it
+- What the request was attempting to do
+- Counters of how often things happened (cache hits, retries, etc.)
+- Timers of how long things took (database queries, remote calls, etc.)
+- Metadata for correlation (trace IDs, request IDs)
+
+The request log serves as both an audit log and a complete trace for everything that happened in the service for that request.
+
+**2. Debugging data (unstructured logs)**: Includes unstructured or loosely structured data of whatever debugging lines the application emits. Typically these are error or warn log lines from frameworks like Log4j—stack traces, error messages, debug statements.
+
+At Amazon, these two types are typically emitted into **separate log files**, partially for historical reasons but also because it's convenient to do log analysis on homogeneous log entry formats. Structured request logs have consistent fields and can be parsed uniformly; debugging logs are free-form text better suited to search tools.
+
+### From Logs to Metrics to Alarms
+
+The flow from instrumentation to operational awareness works like this:
+
+1. **Application emits logs**: Structured request logs and unstructured debug logs write to files on the application server
+2. **Agents ship logs**: Agents like CloudWatch Logs Agent process both types in real-time and ship logs to CloudWatch Logs
+3. **Metrics are computed**: CloudWatch Logs produces aggregate metrics about the service in near real-time (error rates, latency percentiles, request counts, etc.)
+4. **Alarms trigger**: CloudWatch Alarms reads these aggregate metrics and triggers alarms when thresholds are crossed
+
+This pipeline means that adding instrumentation code to log a new timer or counter automatically makes it available in metrics and dashboards with minimal additional configuration.
+
+**Try it yourself:** Experiment with the interactive simulation below to see how instrumentation and metrics work in practice.
+
+<MetricsDashboard />
+
+### The Cost of Comprehensive Logging
+
+Although it can be expensive to log detailed information about every request—storage costs, I/O overhead, CPU for serialization—Amazon finds it incredibly important to do so.
+
+> "After all, we need to investigate availability blips, latency spikes, and customer-reported problems. Without detailed logs, we can't give customers answers, and we won't be able to improve their service."
+
+The cost of logging is real and must be managed (we'll cover high-throughput optimizations later), but the cost of not having logs—extended debugging time, inability to answer customer questions, repeated issues due to lack of data—is far higher.
+
+## Request Log Best Practices: How We Log
+
+Amazon has learned specific habits over time about logging structured "per unit of work" data effectively. These practices maximize the value of logs while managing costs and operational overhead.
+
+### One Entry Per Unit of Work
+
+**Emit one request log entry for every unit of work.** A unit of work is typically a request the service received or a message it pulls from a queue.
+
+Write one service log entry for each request. Don't combine multiple units of work together. This way, when troubleshooting a failed request, there's a single log entry to look at containing:
+- Relevant input parameters about the request
+- Information about who the caller was
+- All timing and counter information in one place
+- The ultimate outcome (success or specific failure reason)
+
+This single-entry-per-request pattern makes log analysis straightforward. To understand what happened to request ID "xyz-789", find that one log entry. Everything about that request is there.
+
+### No More Than One Entry Per Request
+
+**Emit no more than one request log entry for a given request.** In non-blocking service implementations, it might seem convenient to emit a separate log entry for each stage in a processing pipeline. This is tempting but problematic.
+
+Instead, Amazon has more success by plumbing a handle to a single "metrics object" around between stages in the pipeline, and then serializing the metrics out as a single unit after all stages complete.
+
+Having multiple log entries per unit of work:
+- Makes log analysis more difficult (which entries belong together?)
+- Increases the already expensive logging overhead by a multiplier
+- Complicates aggregation (how do you count requests when each has multiple entries?)
+
+If writing a new non-blocking service, plan the metrics logging lifecycle up front. It becomes very difficult to refactor and fix later when the service is in production.
+
+<Callout type="tip">
+For long-running tasks (multiple-minute or multiple-hour workflows), break the rule and emit separate log entries periodically. This allows determining if progress is being made and where slowdowns occur. The trade-off makes sense for truly long-running work.
+</Callout>
+
+### Record Request Details Early
+
+**Record details about the request before doing stuff like validation.** It's important for troubleshooting and audit logging to log enough information about the request to know what it was trying to accomplish.
+
+Log this information as early as possible, before the request has a chance to be rejected by validation, authentication, or throttling logic. This ensures that rejected requests still appear in logs—critical for understanding why requests are being rejected and detecting attacks or misconfigurations.
+
+When logging information from incoming requests, **sanitize input** (encode, escape, and truncate) before logging:
+
+**Truncate long strings**: Don't include 1 MB long strings in service log entries if the caller passed one in. This risks filling disks and costing far more than expected in log storage. Truncate to reasonable lengths (e.g., 1000 characters).
+
+**Filter control characters**: Filter out ASCII control characters or escape sequences relevant to the log format. Malicious callers might try to inject fake log entries. (Reference: https://xkcd.com/327/ - "Bobby Tables")
+
+**Escape special characters**: If log format uses special delimiters (tabs, newlines, quotes), escape them in logged values to prevent breaking log parsing.
+
+### Plan for Increased Verbosity
+
+**Plan for a way to log at increased verbosity.** For troubleshooting some problems, standard logs lack sufficient detail about problematic requests to figure out why they failed.
+
+That information might be available in the service but too verbose to log all the time:
+- Complete request payloads (might be many KB)
+- Detailed step-by-step processing traces
+- Every cache lookup attempt
+- Complete stack traces for all errors (not just unexpected ones)
+
+Have a configuration knob that can be dialed to increase the log's verbosity temporarily while investigating an issue:
+- Turn on for individual hosts (to debug one server's behavior)
+- Turn on for individual clients (to debug one customer's requests)
+- Turn on at a sampling rate across the fleet (1% of requests get verbose logging)
+
+**Critical**: Remember to turn the knob back down when done, or logging costs spiral and disks fill.
+
+### Keep Metric Names Short But Descriptive
+
+Amazon has used the same service log serialization for over 15 years. In this serialization, each counter and timer name is repeated in plain text in every service log entry.
+
+To minimize logging overhead, use timer names that are **short, yet descriptive**:
+- `DbQueryTime` instead of `DatabaseQueryExecutionDurationMilliseconds`
+- `CacheHit` instead of `WasProductFoundInLocalCache`
+- `RemoteCacheMs` instead of `RemoteCacheCallDurationInMilliseconds`
+
+Amazon is beginning to adopt new serialization formats based on binary protocols like Amazon Ion, which are more efficient. Ultimately, it's important to choose a format that:
+- Log analysis tools can understand
+- Is as efficient as possible to serialize
+- Is as efficient as possible to deserialize
+- Minimizes storage costs
+
+### Ensure Adequate Log Volume Capacity
+
+**Ensure log volumes are big enough to handle logging at maximum sustained throughput.** Load test services at maximum sustained load (or even overload) for hours. Verify that when the service handles excess traffic, it still has the resources to ship logs off-box at the rate that new log entries are produced.
+
+If log shipping can't keep up, disks eventually fill. When disks fill, the service can't log anymore, operating blind. Or worse, the service crashes because it can't write to disk.
+
+Mitigations:
+- **Size disks appropriately** for maximum logging rate
+- **Configure logging on a different file system partition** than the root partition, so that even if logging fills up its partition, the system doesn't break down
+- **Use dynamic sampling proportional to throughput** (covered later)
+- **Test at overload** to prove the system can handle it
+
+No matter the strategy, **it's critical to test**. Many production incidents trace back to logs overwhelming disk capacity during traffic spikes.
+
+### Consider Disk-Full Behavior
+
+**Consider the behavior of the system when disks fill up.** When a server's disk fills up, it can't log to disk. When that happens, what should the service do?
+
+**Option 1: Stop accepting requests**: If operating without logging is too risky (you need logs for audit, compliance, or troubleshooting), the service might reject new requests when disk is full. This ensures you maintain logging, but impacts availability.
+
+**Option 2: Drop logs and continue operating**: The service keeps operating but stops logging. This maintains availability but loses visibility into what's happening. If there's an ongoing problem, you can't diagnose it.
+
+There's no universally correct answer—it depends on service requirements. But you must make an intentional choice and test that the system behaves correctly.
+
+Amazon tests systems to ensure that **servers with nearly full disks are detected** through monitoring before they completely fill, allowing operators to intervene before critical decisions are forced.
+
+### Synchronize Clocks
+
+The notion of "time" in distributed systems is notoriously complicated. Amazon does not rely on clock synchronization in distributed algorithms (as discussed in the leader election lesson), but **it is necessary for making sense of logs**.
+
+When analyzing logs from multiple servers, timestamps need to be comparable. If one server thinks it's 14:23:45 and another thinks it's 14:19:12 (clocks are 4+ minutes apart), correlating logs becomes nearly impossible.
+
+Run daemons like **Chrony or ntpd** for clock synchronization. Monitor servers for clock drift. AWS provides the **Amazon Time Sync Service** to make this easier—a highly accurate and reliable time reference accessible from EC2 instances.
+
+Even with perfect clock sync, remember that in distributed systems:
+- Network latency means timestamps from different servers don't represent a global ordering
+- Clock granularity means events at "the same time" might have happened in different orders
+- But logs with roughly synchronized timestamps are vastly easier to analyze than logs with unsynchronized clocks
+
+### Emit Zero Counts for Availability Metrics
+
+**Emit zero counts for availability metrics.** Error counts are useful, but error percentages can be more valuable.
+
+To instrument for an "availability percentage" metric, a useful strategy is:
+- Emit a **1** when the request succeeds
+- Emit a **0** when the request fails
+- Then the "average" statistic of the resulting metric is the availability rate
+
+For example, if you emit [1, 1, 0, 1, 1, 1, 0, 1, 1, 1], the average is 0.8 = 80% availability.
+
+Intentionally emitting 0 data points helps in other situations too:
+
+**Leader election monitoring**: If an application performs leader election, emit a 1 periodically when the process is the leader, and a 0 when the process is not the leader. This way:
+- If the leader process stops emitting (crashes), the metric stops
+- If a follower process stops emitting (crashes), the metric stops
+- You can detect broken followers that can't take over if the leader fails
+
+Without emitting 0s, a follower that crashes just stops emitting anything. With 0s, you can alarm on followers not emitting their "I'm not the leader" heartbeat.
+
+<Mermaid title="Availability Metric Emission: Success vs Failure" chart={`graph TD
+    A[Request Processing] --> B{Success?}
+    B -->|Yes| C[Emit Value: 1]
+    B -->|No| D[Emit Value: 0]
+    C --> E[Aggregate Metrics]
+    D --> E
+    E --> F[Average = Availability %]
+    E --> G[Sum = Total Successes]
+    E --> H[Count = Total Requests]
+
+    style C fill:#d4edda,color:#1a1a1a
+    style D fill:#f8d7da,color:#1a1a1a
+`} />
+
+## Request Log Best Practices: What We Log
+
+Beyond how to structure logs, what specific data should logs contain? Amazon's experience provides clear guidance on what to include and what to avoid.
+
+### Log Dependency Availability and Latency
+
+**Log the availability and latency of all dependencies.** This is particularly helpful in answering questions like "why was the request slow?" or "why did the request fail?"
+
+Without this logging, you can only compare graphs of dependencies with graphs of your service, and guess whether one spike in a dependent service's latency led to the failure of a request you're investigating.
+
+With this logging, the specific request's log entry shows:
+- DynamoDB query took 250ms (normally 10ms) → slow request explained
+- Redis call returned error "connection timeout" → cache miss led to database load
+- Payment service returned HTTP 503 → order processing failed, not your bug
+
+Many service and client frameworks plumb metrics automatically, but other frameworks (like the AWS SDK, for example) **require manual instrumentation**. Don't assume you automatically get dependency metrics—verify and add instrumentation if needed.
+
+### Break Out Dependency Metrics Per Call
+
+**Break out dependency metrics per call, per resource, per status code, etc.** If you interact with the same dependency multiple times in the same unit of work, include metrics about each call separately, and make clear which resource each request was interacting with.
+
+For example, when calling DynamoDB, some teams have found it helpful to include:
+- Timing and latency metrics **per table**
+- Metrics **per error code** (conditional check failed, throttling, etc.)
+- Metrics **per number of retries** (0 retries, 1 retry, 2+ retries)
+
+This makes it easier to troubleshoot cases where the service was slow from retries due to conditional check failures. These metrics also revealed cases where client-perceived latency increases were actually due to throttling retries or paginating through a result set, and not from packet loss or network latency.
+
+**Example**: Without per-table metrics, you might see "DynamoDB latency is high." With per-table metrics, you see "DynamoDB latency is high for UserTable but normal for SessionTable," immediately focusing investigation on UserTable capacity or data model issues.
+
+### Record Memory Queue Depths
+
+**Record memory queue depths when accessing them.** If a request interacts with a queue—pulling an object out or putting something in—record the current queue depth into the metrics object.
+
+For in-memory queues, this information is very cheap to obtain (just read the queue's size). For distributed queues, this metadata may be available for free in responses to API calls (SQS returns approximate message count, for example).
+
+This logging helps find backlogs and sources of latency in the future. If requests are slow and logs show "processing queue had 10,000 items," that explains the slowness.
+
+When taking things out of a queue, also **measure the duration that things were in the queue**. This means adding your own "enqueue time" metadata to the message before enqueueing it in the first place. When dequeuing, compute `current_time - enqueue_time` to measure queue wait time.
+
+These queue metrics often reveal the source of latency issues that are otherwise mysterious.
+
+### Add Counters for Every Error Reason
+
+**Add an additional counter for every error reason.** Consider adding code that counts the specific error reason for every failed request.
+
+The application log will include information that led up to the failure and detailed exception messages. However, teams also find it helpful to **see trends in error reasons in metrics over time** without having to mine for that information in the application log.
+
+It's handy to start with a separate metric for each failure exception class:
+- `NullPointerException` counter
+- `DatabaseTimeoutException` counter
+- `InvalidInputException` counter
+- `ThrottlingException` counter
+
+When you see "errors increased from 10/hour to 1000/hour," having per-exception-type counters instantly shows "it's all ThrottlingException"—you're being throttled. Without these counters, you'd need to mine application logs to figure out what changed.
+
+### Organize Errors by Category of Cause
+
+**Organize errors by category of cause.** If all errors are lumped into the same metric, the metric becomes noisy and unhelpful.
+
+At a minimum, separate errors that were **"client's fault"** from errors that were **"server's fault"**:
+- Client errors: Invalid input, authentication failures, throttling (client exceeded quota)
+- Server errors: Database timeouts, internal exceptions, resource exhaustion
+
+This distinction matters for alarms and SLAs. Server errors indicate problems you need to fix. Client errors might be normal (clients trying invalid inputs) or indicate documentation/API issues.
+
+Beyond that, further breakdown might be helpful. For example, in DynamoDB:
+- **Conditional write failures**: Clients deliberately make conditional requests that return errors if preconditions don't match. These errors are expected and normal.
+- **Invalid request errors**: These are most likely client bugs that need to be fixed, but they don't indicate DynamoDB problems.
+- **Server errors**: These indicate actual DynamoDB operational issues.
+
+| Error Category | Description | Alarm Threshold | Typical Cause |
+|---------------|-------------|----------------|---------------|
+| Client Invalid Input | Bad parameters, missing required fields | No alarm (expected) | Client bugs, API misunderstanding |
+| Client Throttling | Rate limit exceeded | Alarm on sustained increases | Client burst, capacity planning needed |
+| Client Conditional Failure | Optimistic locking conflict | No alarm (by design) | Concurrent modifications |
+| Server Timeout | Backend operation timed out | Alarm immediately | Overload, capacity, downstream issues |
+| Server Internal Error | Unexpected exceptions | Alarm immediately | Code bugs, resource exhaustion |
+
+### Log Important Request Metadata
+
+**Log important metadata about the unit of work.** In a structured metric log, include enough metadata about the request so you can later determine whom the request was from and what it was attempting to do.
+
+This includes metadata that a customer would expect you to have in logs when they reach out with problems. For example:
+- DynamoDB logs the **table name** a request is interacting with
+- DynamoDB logs whether a read operation was a **consistent read or not**
+- But DynamoDB **does not log the data** being stored to or retrieved from the database
+
+Balance is key: log enough to understand what happened and answer customer questions, but don't log actual customer data (which raises privacy and storage cost concerns).
+
+### Protect Logs with Access Control and Encryption
+
+**Protect logs with access control and encryption.** Because logs contain some degree of sensitive information, take measures to protect and secure that data:
+
+- **Encrypt logs** at rest and in transit
+- **Restrict access** to operators who are troubleshooting problems (not everyone in the company)
+- **Regularly baseline access**, detecting unexpected access patterns
+- **Audit log access**, maintaining records of who accessed logs when
+- **Retain logs** for appropriate periods (compliance requirements vary)
+
+Logs often contain PII (personally identifiable information) like customer IDs, IP addresses, or transaction details. Treat logs as sensitive data requiring protection.
+
+### Avoid Overly Sensitive Information
+
+**Avoid putting overly sensitive information in logs.** Logs need to contain some sensitive information to be useful—it's important for logs to include enough information to know whom a given request came from.
+
+But leave out overly sensitive information such as:
+- Request parameters that do not affect routing or behavior of processing
+- Customer message content
+- Credit card numbers, passwords, or other credentials
+- Personal health information or other regulated data
+
+For example, if code is parsing a customer message and the parse fails, it's important to **not log the payload** to protect customer privacy, as difficult as that may make troubleshooting later.
+
+Use tooling to make decisions about what can be logged in an **opt-in way** instead of an opt-out way, to prevent the logging of new sensitive parameters added later. Services like Amazon API Gateway allow configuring which data to be included in its access log, which acts as a good opt-in mechanism.
+
+### Log Trace IDs and Propagate in Backend Calls
+
+**Log a trace ID and propagate it in backend calls.** A given customer request will likely involve many services working in cooperation. This can be as few as two or three services for many AWS requests, to far more services for amazon.com requests (sometimes 50+ services for a single page render).
+
+To make sense of what happened when troubleshooting a distributed system, propagate the same trace ID between these systems so you can line up logs from various systems to see where failures happened.
+
+A **trace ID** is a sort of meta request ID stamped to a distributed unit of work by the "front door" service that was the starting point. Modern distributed tracing typically uses **OpenTelemetry** for instrumentation, which automatically handles trace context propagation and sends trace data to backends like AWS X-Ray for storage and visualization.
+
+<Callout type="tip">
+Pass trace IDs explicitly in method signatures. In multi-threaded environments, it's very difficult and error-prone for frameworks to do propagation automatically. Many teams pass a **Context object** in method signatures containing trace ID, request ID, metrics object, and other cross-cutting concerns. This makes propagation explicit and enables adding new context later without refactoring all methods.
+</Callout>
+
+For AWS teams, it's not just about troubleshooting internal systems—it's also about customers troubleshooting theirs. Customers rely on trace context being passed between AWS services when they interact with each other on the customer's behalf. OpenTelemetry provides standardized trace propagation (via W3C Trace Context headers), ensuring customers get complete trace data when using AWS X-Ray or other observability backends.
+
+### Log Different Latency Metrics by Status Code and Size
+
+**Log different latency metrics depending on status code and size.** Errors are often fast—like access denied, throttling, and validation error responses. If clients start getting throttled at a high rate, it might make latency look deceptively good (lots of fast error responses bring down the average).
+
+To avoid this metric pollution, log a **separate timer for successful responses**, and focus on that metric in dashboards and alarms instead of using a generic Time metric.
+
+Similarly, if there's an operation that can be slower depending on input size or response size, consider emitting a latency metric that is categorized:
+- `SmallRequestLatency` (< 1KB)
+- `MediumRequestLatency` (1KB - 100KB)
+- `LargeRequestLatency` (> 100KB)
+
+This metric-bucketing technique isolates customer behavior and keeps distracting noise out of dashboards. If you see "latency increased," breaking down by size might show "only large request latency increased"—pointing to a specific cause like network throttling or serialization overhead, not a general backend problem.
+
+<Mermaid title="Latency Metrics by Status and Request Size" chart={`graph TD
+    A[Request] --> B{Status}
+    B -->|Success| C[SuccessLatency Metric]
+    B -->|Client Error| D[ClientErrorLatency Metric]
+    B -->|Server Error| E[ServerErrorLatency Metric]
+
+    C --> F{Request Size}
+    F -->|Small| G[SmallRequestLatency]
+    F -->|Medium| H[MediumRequestLatency]
+    F -->|Large| I[LargeRequestLatency]
+
+    style C fill:#d4edda,color:#1a1a1a
+    style D fill:#fff3cd,color:#1a1a1a
+    style E fill:#f8d7da,color:#1a1a1a
+`} />
+
+## Application Log Best Practices
+
+For unstructured debug log data (Log4j, system logs, debug output), Amazon follows specific habits to maintain useful signal-to-noise ratios.
+
+### Keep Application Logs Free of Spam
+
+**Keep the application log free of spam.** Although you might have INFO and DEBUG level log statements on the request path to help with development and debugging in test environments, consider disabling these log levels in production.
+
+Instead of relying on application logs for request tracing information, use structured service logs as the location for trace information. Service logs make it easy to produce metrics and see aggregate trends over time.
+
+However, there's **no black-and-white rule** here. The approach is to continuously review logs to see if they're too noisy (or not noisy enough), and adjust log levels over time.
+
+When log diving (analyzing production logs), teams often find:
+- Log statements that are too noisy (appearing millions of times, not providing value)
+- Metrics that they wish they had (something not being logged that would help)
+
+These improvements are often easy to make, so teams file quick follow-up backlog items to keep logs clean.
+
+### Include Corresponding Request IDs
+
+**Include the corresponding request ID** in application log entries. When troubleshooting an error in the application log, you often want to see details about the request or the caller that triggered the error.
+
+If both request logs and application logs contain the same request ID, you can easily jump from one log to the other:
+1. See error in application log with request ID "xyz-789"
+2. Find that request ID in structured request logs
+3. See complete request context—who called, what parameters, what other operations succeeded
+
+Application logging libraries will write out the corresponding request ID if properly configured, typically by setting the request ID as a **ThreadLocal**. If an application is multithreaded, take special care to set the correct request ID when a thread starts working on a new request.
+
+### Rate-Limit Application Log Error Spam
+
+**Rate-limit an application log's error spam.** Typically, a service won't emit much to the application log, but if it suddenly starts exhibiting a large volume of errors, it might suddenly start writing out a high rate of very large log entries with stack traces.
+
+One way to guard against this is to **rate-limit how often a given logger will log**. For example, configure Log4j to say "this logger can emit at most 100 entries per minute." After that limit, entries are dropped (with a counter tracking how many were dropped).
+
+This prevents cascading failures where:
+1. Service starts experiencing errors
+2. Each error logs a 5KB stack trace
+3. Thousands of errors per second occur
+4. Logging overwhelms disk I/O
+5. Disk fills up
+6. System crashes
+
+Rate-limiting stops this cascade at step 3, allowing the system to continue operating (albeit with limited logging) instead of crashing completely.
+
+### Prefer Format Strings Over String Concatenation
+
+**Prefer format strings over String#format or string concatenation.** Older application log APIs accept a single string message instead of Log4j2's varargs format string API.
+
+If code is instrumented with DEBUG statements, but production is configured at ERROR level, it's possible to waste work formatting DEBUG message strings that are ignored:
+
+```java
+// BAD: String is formatted even if DEBUG is disabled
+logger.debug("Processing item " + item.getId() + " with value " + item.getValue());
+
+// GOOD: String is only formatted if DEBUG is enabled
+logger.debug("Processing item {} with value {}", item.getId(), item.getValue());
+```
+
+Some logging APIs support passing in arbitrary objects that will have their `toString()` methods called only if the log entry will actually be written out.
+
+This optimization matters for performance-sensitive code paths where DEBUG logging is instrumented for troubleshooting but normally disabled in production.
+
+### Log Request IDs from Failed Service Calls
+
+**Log request IDs from failed service calls.** If a service is called and returns an error, the service likely returned a request ID. It's useful to include the request ID in logs so that if you need to follow up with that service owner, you have a way for them to easily find their own corresponding service log entries.
+
+Example: Your service calls DynamoDB and gets a timeout error. DynamoDB returns a request ID with the error. Log it:
+```
+ERROR: DynamoDB query timed out for table UserData, DynamoDB request ID: abc-def-123-456
+```
+
+When you contact the DynamoDB team for help, you can say "DynamoDB request ID abc-def-123-456 timed out." They can immediately find their logs for that request and diagnose whether it was throttling, capacity issues, or something else.
+
+Timeout errors make this tricky because the service might not have returned a request ID yet, or a client library might not have parsed it. Nonetheless, **if you have a request ID back from the service, log it**.
+
+## High Throughput Services Best Practices
+
+For the vast majority of services at Amazon, logging on every request doesn't impose an unreasonable cost overhead. Higher throughput services enter a grayer area, but often still log on every request.
+
+For example, it's natural to assume that **DynamoDB**, serving at peak over 20 million requests per second of Amazon-internal traffic alone, would not log very much. In fact, it **logs every request** for troubleshooting and for audit and compliance reasons.
+
+Here are high-level tips Amazon uses to make logging more efficient at higher per-host throughput:
+
+### Log Sampling
+
+**Instead of writing every entry, consider writing out every N entries.** Each entry also includes how many entries were skipped so that metric aggregation systems can estimate the true log volume in the metrics it computes.
+
+For example, if you sample at 1%, each logged entry includes a field `sample_rate: 0.01`. Metric systems multiply counters by 100 to estimate true volumes: `estimated_request_count = logged_count * 100`.
+
+Other sampling algorithms provide different benefits:
+- **Reservoir sampling**: Provides more representative samples
+- **Priority sampling**: Prioritizes logging errors or slow requests over successful, fast requests
+
+However, **sampling has downsides**:
+- Loses ability to help customers troubleshoot specific failures (their request might not have been sampled)
+- Some compliance requirements disallow sampling altogether
+- Debugging rare issues becomes harder (they might not appear in sampled logs)
+
+Sampling is a last resort after exhausting other optimizations.
+
+### Offload Serialization to Separate Thread
+
+**Offload serialization and log flushing to a separate thread.** This is an easy change and is commonly used.
+
+The request processing thread adds entries to an in-memory queue. A background thread pulls from the queue, serializes entries to disk, and flushes. This prevents request processing from blocking on I/O operations.
+
+Be careful with queue sizing: if the background thread can't keep up, the queue grows unbounded, consuming memory. Monitor queue depth and have backpressure mechanisms (like sampling or dropping logs) when the queue gets too large.
+
+### Frequent Log Rotation
+
+**Rotating log files every minute instead of every hour** improves several things:
+
+**Page cache benefits**: The agent that reads and compresses the log file will be reading from page cache (hot in memory) instead of disk, reducing I/O.
+
+**Spread CPU and I/O load**: The CPU and I/O from compressing and shipping logs spreads out over the hour instead of always triggering at the end of the hour, creating periodic load spikes.
+
+Frequent rotation does increase the number of files to manage, but modern tooling handles this well, and the operational benefits outweigh the complexity.
+
+### Write Logs Pre-Compressed
+
+**If a log-shipping agent compresses logs before sending them to an archival service**, the system CPU and disk will spike on a periodic basis. It's possible to amortize this cost and reduce disk I/O by half by streaming compressed logs out to disk.
+
+The application compresses log entries as they're written. The log file on disk is already compressed, saving disk space and shipping bandwidth.
+
+This comes with some risks: **compression algorithms must handle truncated files** in case of an application crash (the compressed stream might be incomplete). Use algorithms like gzip or snappy that gracefully handle truncation.
+
+### Write to Ramdisk / tmpfs
+
+**It might be easier for a service to write logs to memory until they are shipped off the server** instead of writing logs to disk. In Amazon's experience, this works best with log rotation every minute versus log rotation every hour.
+
+A ramdisk (or tmpfs in Linux) creates a filesystem in memory. Writes are extremely fast (no disk I/O), but data is lost on server restart or crash. This is acceptable for logs being continuously shipped off-server.
+
+Tradeoffs:
+- **Much faster writes** (memory speed vs. disk speed)
+- **Data loss on crash** (logs since last ship are lost—typically < 1 minute of logs)
+- **Memory consumption** (logs consume RAM that could be used for application caching or processing)
+
+Monitor ramdisk usage to ensure it doesn't grow unbounded and consume all memory.
+
+### In-Memory Aggregates
+
+**If it's necessary to handle hundreds of thousands of transactions per second on a single machine**, it might be too expensive to write a single log entry per request.
+
+However, **you lose a lot of observability by skipping this**, so Amazon has found it helpful to **not prematurely optimize**. First, try all other optimizations (separate thread, frequent rotation, pre-compression, ramdisk). Only if those aren't sufficient should you consider in-memory aggregation.
+
+In-memory aggregation means computing aggregate metrics in memory (request count, average latency, error count) and periodically flushing aggregates instead of per-request logs. This drastically reduces logging volume but eliminates the ability to troubleshoot individual requests.
+
+### Monitor Resource Utilization
+
+**Pay attention to how close you are to reaching some scaling limit.** Measure per-server I/O and CPU, and how much of those resources are being consumed by logging agents.
+
+When performing load tests, run them long enough so that you can prove log shipping agents can keep up with throughput. Sustained load for hours (not minutes) reveals whether logging is sustainable.
+
+Monitor:
+- Disk I/O utilization (what percentage is logging?)
+- CPU utilization (what percentage is serialization/compression?)
+- Network bandwidth (what percentage is log shipping?)
+- Disk space growth (are logs accumulating faster than they're being shipped?)
+
+Set alarms for resource utilization approaching limits (e.g., disk 80% full) to intervene before critical thresholds.
+
+## Have the Right Log Analysis Tools in Place
+
+At Amazon, teams operate the services they write, so everyone needs to become expert at troubleshooting them. This includes being able to do log analysis effortlessly.
+
+There are many tools at disposal, from local log analysis for looking at a relatively small number of logs, to distributed log analysis for sifting through and aggregating results from enormous volumes of logs.
+
+Amazon has found it important to **invest in teams' tools and runbooks for log analysis**. If logs are small now but a service expects to grow over time, pay attention to when current tools stop scaling, so you can invest in adopting distributed log analysis solutions before they become critical needs.
+
+### Local Log Analysis Tools
+
+For analyzing logs on individual servers or small log volumes, command-line tools are incredibly powerful.
+
+A common operation like "find the top talker IP addresses in the log" is simply:
+```bash
+cat log | grep -P "^RemoteIp=" | cut -d= -f2 | sort | uniq -c | sort -nr | head -n20
+```
+
+Other useful tools include:
+- **jq**: For parsing and querying JSON logs (https://stedolan.github.io/jq/)
+- **RecordStream**: For processing structured log records (https://github.com/benbernard/RecordStream)
+- **awk**: For pattern matching and field extraction
+- **sed**: For text transformation
+
+Example using jq to extract all errors from JSON logs:
+```bash
+cat service.log | jq 'select(.level == "ERROR") | {timestamp, requestId, message}'
+```
+
+Example using RecordStream to compute average latency by endpoint:
+```bash
+cat service.log | recs fromjson | recs collate -k endpoint -a avg,latency
+```
+
+These tools are fast, composable, and don't require special infrastructure. Engineers can analyze logs directly on servers during troubleshooting.
+
+### Distributed Log Analysis
+
+Any big data analytics service can be used to do distributed log analysis (for example, Amazon EMR, Amazon Athena, Amazon Aurora, and Amazon Redshift). Some services come equipped with logging systems, like **CloudWatch Logs Insights**.
+
+**CloudWatch Logs Insights** provides a query language for analyzing logs across many servers and time ranges:
+```
+fields @timestamp, requestId, latency
+| filter latency > 1000
+| stats avg(latency), max(latency), count() by endpoint
+| sort avg(latency) desc
+```
+
+**AWS X-Ray** (https://aws.amazon.com/xray/) provides distributed tracing capabilities. As of 2025, the recommended approach is to **instrument applications with OpenTelemetry** (or **AWS Distro for OpenTelemetry**, ADOT) which sends trace data to the X-Ray service backend for storage and visualization. The original X-Ray SDKs and X-Ray Daemon entered maintenance mode in 2025, with OpenTelemetry now serving as the primary instrumentation standard. X-Ray continues as a fully supported trace backend, visualizing request flows, latencies, and errors across distributed services.
+
+**CloudWatch Application Signals** (launched in 2025) provides automatic service topology discovery, SLO monitoring, and auto-instrumentation capabilities, particularly for Amazon EKS workloads. Application Signals automatically discovers service dependencies, tracks golden signals (latency, traffic, errors, saturation), and enables teams to define and monitor service level objectives without extensive manual instrumentation.
+
+**Amazon Athena** (https://aws.amazon.com/athena/) allows running SQL queries directly against logs stored in S3, enabling complex analysis without loading data into databases.
+
+These tools scale to analyzing terabytes or petabytes of logs, enabling questions like:
+- "Show me all requests from customer X in the last 30 days that failed"
+- "Which endpoints have P99 latency > 500ms?"
+- "How does error rate correlate with deployment times?"
+
+<Mermaid title="AWS Observability Stack: Logs, Traces, and Metrics" chart={`graph TD
+    A[Application Servers] --> B[CloudWatch Logs]
+    B --> C[CloudWatch Logs Insights]
+    B --> D[S3 Archive]
+    D --> E[Athena SQL Queries]
+
+    A --> F[ADOT Collector]
+    F --> G[X-Ray / CloudWatch]
+    G --> H[Distributed Trace Visualization]
+
+    style B fill:#e1f5ff,color:#1a1a1a
+    style C fill:#d4edda,color:#1a1a1a
+    style E fill:#d4edda,color:#1a1a1a
+    style H fill:#d4edda,color:#1a1a1a
+`} />
+
+## Conclusion: Logs as a Reward
+
+> "As a service owner and a software developer, I spend an enormous amount of my time looking at the outputs of instrumentation—graphs on dashboards, individual log files—and using distributed log analysis tools like CloudWatch Logs Insights. These are some of my favorite things to do. When I need a break after wrapping up some challenging task, I recharge my batteries and reward myself with some log diving."
+
+This sentiment, from the author of Amazon's instrumentation guide, reflects Amazon's operational culture. Log diving isn't a chore—it's an opportunity to:
+- Understand how systems really behave in production
+- Discover optimization opportunities
+- Learn why metrics spike at certain times
+- Validate that recent changes improved performance
+
+Teams start with questions like "why did this metric spike here?" or "could the latency of this operation be lower?" When questions lead to dead ends, they often figure out some measurement that would be helpful in the code, so they add the instrumentation, test it, and send a code review to teammates.
+
+### Ongoing Process
+
+Despite the fact that many metrics come with managed services you use, you need to spend a lot of thought on instrumenting your own services so you have the visibility needed to operate them effectively.
+
+During operational events, you need to quickly determine:
+- Why you're having a problem
+- What you can do to mitigate that problem
+
+Having the right metrics on dashboards is crucial for quick diagnosis.
+
+Because you are always changing services—adding new features, changing the way they interact with dependencies—the exercise of updating and adding the right instrumentation is **forever ongoing**. Instrumentation isn't a one-time effort during initial development. It evolves with the service.
+
+<KeyTakeaways>
+- **Instrument explicitly for visibility**: Comprehensive instrumentation requires intentional coding that records what happened, success/failure status, durations, and metadata for every unit of work—don't assume automatic instrumentation is sufficient
+- **Log first, aggregate later**: Write detailed structured logs for every request; process logs afterward to compute aggregate metrics rather than aggregating within applications—this provides both high-level metrics and request-level troubleshooting data from a single instrumentation approach
+- **Multi-perspective monitoring is essential**: Measure system behavior from multiple vantage points—each component measuring itself and its perception of other components—to quickly identify problem sources in distributed systems
+- **Focus on high percentiles for customer experience**: Optimize for 99.9th and 99.99th percentile latency rather than just averages, as tail latency in one service multiplies through service call chains, and reducing tail latency typically improves median latency as a side effect
+- **One log entry per unit of work**: Emit exactly one structured log entry per request, containing all timing, counters, and metadata in one place for easy troubleshooting—multiple entries per request complicate analysis and increase costs
+- **Propagate trace IDs across services**: Assign trace IDs at the "front door" service and propagate them to all collaborating services so you can correlate logs across distributed systems and reconstruct complete request flows
+- **Balance detail with cost**: While detailed logging has costs (storage, I/O, CPU), Amazon finds it essential for troubleshooting, customer support, and continuous improvement—optimize through sampling, compression, and efficient serialization only when necessary, not prematurely
+- **Log dependencies' availability and latency from your perspective**: Don't rely solely on AWS service metrics—instrument your service to measure how it experiences dependency behavior, breaking down metrics per call, per resource, and per error type
+- **Protect logs but avoid overly sensitive data**: Encrypt logs, restrict access, and log enough metadata to answer customer questions, but avoid logging actual customer data, message content, or credentials—use opt-in mechanisms to prevent accidentally logging new sensitive fields
+- **Separate success latency from error latency**: Errors are often fast, making overall latency metrics misleading when error rates increase—log separate timers for successful vs. failed requests, and consider bucketing by request size when size affects latency
+- **Operational culture values logs**: At Amazon, log diving isn't a chore—it's a rewarding way to understand systems, discover optimizations, and validate improvements—invest in log analysis tools and runbooks appropriate to your scale
+</KeyTakeaways>

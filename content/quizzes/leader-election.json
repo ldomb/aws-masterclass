@@ -1,0 +1,60 @@
+{
+  "lessonSlug": "leader-election",
+  "questions": [
+    {
+      "question": "Your distributed cache needs strong consistency guarantees. You're deciding between leader election for a single primary node versus a quorum-based approach. What is the PRIMARY advantage of leader election here?",
+      "options": [
+        "Leader election provides better fault tolerance than quorum protocols",
+        "A single leader can provide consistency more easily and efficiently by seeing all changes",
+        "Leader election scales better to high request rates than quorum approaches",
+        "Leaders are easier to implement than quorum protocols"
+      ],
+      "correctIndex": 1,
+      "explanation": "Option B is the key consistency advantage of leader election. Because a single leader sees and controls all changes to state, it can easily provide strong consistency without complex coordination. Quorum requires multiple nodes to agree on changes (more network round-trips). However, options A and C are actually disadvantages—leader election creates a single point of failure and scaling limitation. While option D may sometimes be true, it's not the primary consistency-related advantage."
+    },
+    {
+      "question": "You implement leader election using leases with 30-second heartbeat intervals. The current leader experiences a 5-second garbage collection pause. During this pause, what is the risk?",
+      "options": [
+        "No risk—the lease is still valid because 5 seconds < 30 seconds",
+        "The leader might perform work after the lease expires, creating a split-brain scenario with a new leader",
+        "The garbage collection pause will prevent all heartbeats, causing immediate leader failure",
+        "Other candidates will immediately take over, causing guaranteed downtime"
+      ],
+      "correctIndex": 1,
+      "explanation": "Option B identifies the critical risk. During a 5-second GC pause, the process is completely frozen. If the leader checked the lease, then paused, then resumed and performed work, the lease might have expired during the pause. A new leader could have taken over, creating two leaders performing work simultaneously (split-brain). This is why Amazon's best practice is to check lease validity immediately before any operation with side effects and avoid assumptions about pause durations."
+    },
+    {
+      "question": "Amazon EBS distributes a volume across many storage servers and uses leader election to pick a primary for each area of the volume. What is the PRIMARY reason for this sharding pattern rather than a single leader for the entire volume?",
+      "options": [
+        "Sharding makes the implementation simpler and easier to understand",
+        "Each shard leader can provide consistency for its area while avoiding a single point of failure for the entire volume",
+        "Sharding eliminates the need for leader election entirely",
+        "Multiple leaders reduce the operational complexity of the system"
+      ],
+      "correctIndex": 1,
+      "explanation": "Option B correctly identifies the key benefit of sharded leader election. Each area's leader provides consistency and coordination efficiency for that area (avoiding data plane coordination), while the overall system avoids having a single point of failure or scaling bottleneck. If one area's leader fails, only that area is affected. Option A is wrong—sharding adds complexity. Option C is wrong—sharding still uses leader election, just many times. Option D is wrong—multiple leaders increase some operational complexity."
+    },
+    {
+      "question": "A leader completes a critical transaction but crashes before marking it durable or notifying clients. The new leader takes over. What is Amazon's principle for handling this scenario?",
+      "options": [
+        "The system should retry the transaction—idempotency ensures duplicate work is safe",
+        "The system should query clients to determine if they received confirmation",
+        "The system should mark the transaction as complete—the leader must have finished it",
+        "The system should wait for the old leader to recover and report what happened"
+      ],
+      "correctIndex": 0,
+      "explanation": "Option A reflects Amazon's approach: make operations idempotent and make work durable before telling others it's complete. The new leader can safely redrive work that might have completed but wasn't marked durable. Option B doesn't scale and creates complex client coordination. Option C risks claiming success for failed work. Option D could cause indefinite unavailability if the old leader never recovers. Idempotency eliminates the need to know exactly what the failed leader accomplished."
+    },
+    {
+      "question": "You're designing a new distributed system that needs to coordinate work across 100 worker nodes. Before implementing leader election, what alternative pattern should you consider first?",
+      "options": [
+        "Implement custom Paxos consensus instead of leader election",
+        "Use multiple leaders (one per worker) to avoid any single point of failure",
+        "Consider if idempotent APIs with optimistic locking could achieve the same goals",
+        "Implement leader election immediately—it's always the best pattern for coordination"
+      ],
+      "correctIndex": 2,
+      "explanation": "Option C reflects Amazon's philosophy: carefully consider alternatives before implementing leader election. Idempotent APIs with optimistic locking often provide simpler, more scalable solutions without single points of failure. AWS Step Functions can also coordinate work without traditional leader election. Option A (Paxos) is more complex than leader election, not simpler. Option B doesn't make sense—one leader per worker eliminates the coordination benefit. Option D contradicts the lesson's core message that leader election has significant downsides to weigh carefully."
+    }
+  ]
+}

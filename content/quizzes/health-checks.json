@@ -1,0 +1,60 @@
+{
+  "lessonSlug": "health-checks",
+  "questions": [
+    {
+      "question": "Your e-commerce service uses a load balancer distributing traffic across 10 servers. A deployment bug causes one server to return 404 errors instantly instead of processing requests. The server is still running and responding to basic TCP checks. What is the most likely impact if no deeper health checks are implemented?",
+      "options": [
+        "Availability drops to approximately 90% or worse, with the broken server potentially attracting more traffic than healthy servers",
+        "The load balancer automatically detects the increased error rate and removes the server from rotation",
+        "The server crashes due to the bug, automatically removing itself from service",
+        "Impact is minimal since the other 9 servers can easily handle the redirected traffic"
+      ],
+      "correctIndex": 0,
+      "explanation": "Without proper health checks, the broken server continues receiving traffic. Because it returns errors instantly (faster than healthy servers processing real requests), load balancing algorithms like 'least requests' may actually send it MORE traffic, creating a 'black hole' that severely degrades availability beyond the expected 10% reduction."
+    },
+    {
+      "question": "You're implementing a health check for a payment processing service that depends on a third-party credit card validation API. The health check queries this API to verify connectivity. All servers in your fleet fail the health check when the third-party API experiences an outage. Which approach best prevents a cascading failure?",
+      "options": [
+        "Remove the dependency check from automated health checks; monitor it separately with careful rate limiting and manual review",
+        "Increase the health check timeout to 60 seconds to accommodate slow third-party responses",
+        "Configure health checks to run every 5 minutes instead of every 30 seconds",
+        "Add retry logic to the health check so it only fails after 3 consecutive API failures"
+      ],
+      "correctIndex": 0,
+      "explanation": "Dependency health checks that can fail across all servers simultaneously should not trigger fast automated responses. Amazon's best practice is to limit automated health checks to local failures only, while monitoring dependencies through centralized systems that can evaluate fleet-wide context and implement careful rate limiting before taking action."
+    },
+    {
+      "question": "During a traffic surge, your service's servers become CPU-bound and slow to respond. Health checks start timing out, causing load balancers to remove servers from rotation. This increases load on remaining servers, causing more timeouts. Which prevention strategy would be most effective?",
+      "options": [
+        "Configure worker thread pools larger than max connections and implement request throttling that always allows health checks",
+        "Increase health check timeout values from 5 seconds to 30 seconds",
+        "Add more servers to the fleet to handle peak traffic",
+        "Disable health checks during high-traffic periods"
+      ],
+      "correctIndex": 0,
+      "explanation": "The key is ensuring health checks are always prioritized and can respond quickly even under overload. Having extra worker capacity beyond max connections ensures health check requests can be processed. Request throttling prevents overload while exempting health checks. Simply increasing timeouts or disabling checks doesn't address the root cause and could make problems worse."
+    },
+    {
+      "question": "Your service exposes both a high-volume data API (serving cached product information) and a low-volume admin API (for updating product data in the database). The database becomes unavailable. What health check design minimizes scope of impact?",
+      "options": [
+        "Implement separate health endpoints for each API, allowing the data API to continue serving cached content while only the admin API fails its health check",
+        "Fail the entire service's health check since the database is unavailable, preventing inconsistent state",
+        "Continue passing health checks for both APIs and rely on error responses to inform clients about the database outage",
+        "Implement a single health check that passes if either the database or cache is available"
+      ],
+      "correctIndex": 0,
+      "explanation": "Amazon's principle of minimizing scope of impact applies here. The data API can still serve cached reads successfully even when the database is down, so it should remain healthy. Only the admin API (which requires database writes) should fail. This prevents turning a soft dependency into a hard dependency that unnecessarily takes down working functionality."
+    },
+    {
+      "question": "You notice that one server in your 50-server fleet is returning HTTP 400 (client error) responses at 10x the rate of other servers for the same API endpoint. The server itself reports healthy on all local checks. Which health check approach would most effectively detect this issue?",
+      "options": [
+        "Implement anomaly detection that compares per-server error rates across the fleet and removes statistical outliers",
+        "Add a dependency health check that verifies the server can communicate with backend services",
+        "Increase the depth of local health checks to test more application code paths",
+        "Configure the load balancer to track backend response codes and fail health checks on elevated 400 errors"
+      ],
+      "correctIndex": 0,
+      "explanation": "This is a classic case for anomaly detection. The server is failing in a way it can't detect about itself—returning client errors instead of server errors, which the server may not recognize as a problem. Anomaly detection compares this server's metrics against its peers and identifies it as an outlier. Client instrumentation or load balancer access logs can provide this data even when server monitoring is compromised."
+    }
+  ]
+}
